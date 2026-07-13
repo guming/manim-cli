@@ -1,0 +1,43 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.0",
+  "name": "equation_intro",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {
+      "id": "title",
+      "type": "Text",
+      "args": {"text": "Quadratic Vertex", "font_size": 40},
+      "style": {"color": "WHITE"},
+      "position": {"mode": "edge", "edge": "UP", "buff": 0.4}
+    },
+    {
+      "id": "formula",
+      "type": "Tex",
+      "args": {"tex": "x_v = -\\frac{b}{2a}", "font_size": 48},
+      "style": {"color": "YELLOW"},
+      "position": {"mode": "relative", "target": "title", "direction": "DOWN", "buff": 0.5}
+    }
+  ],
+  "steps": [
+    {
+      "name": "Show title and formula",
+      "actions": [
+        {"type": "write", "target": "title", "run_time": 0.8},
+        {"type": "fade_in", "target": "formula", "run_time": 0.8}
+      ],
+      "wait_after": 0.5
+    },
+    {
+      "name": "Pause",
+      "actions": [{"type": "wait", "duration": 0.5}]
+    }
+  ]
+}
+

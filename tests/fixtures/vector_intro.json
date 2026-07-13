@@ -1,0 +1,57 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.0",
+  "name": "vector_intro",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {
+      "id": "axes",
+      "type": "Axes",
+      "args": {"x_range": [-1, 5, 1], "y_range": [-1, 4, 1], "width": 6.0, "height": 4.0},
+      "style": {"color": "WHITE", "opacity": 0.55}
+    },
+    {
+      "id": "vector_v",
+      "type": "Arrow",
+      "args": {"start": [0, 0, 0], "end": [3, 2, 0], "coordinate_space": "plane", "axes": "axes", "buff": 0},
+      "style": {"color": "BLUE", "stroke_width": 6}
+    },
+    {
+      "id": "endpoint",
+      "type": "Dot",
+      "args": {"point": [3, 2, 0], "coordinate_space": "plane", "axes": "axes", "radius": 0.08},
+      "style": {"color": "YELLOW"}
+    },
+    {
+      "id": "x_component",
+      "type": "Line",
+      "args": {"start": [0, 0, 0], "end": [3, 0, 0], "coordinate_space": "plane", "axes": "axes"},
+      "style": {"color": "YELLOW", "stroke_width": 4}
+    }
+  ],
+  "steps": [
+    {
+      "name": "Show axes",
+      "actions": [{"type": "fade_in", "target": "axes", "run_time": 0.8}]
+    },
+    {
+      "name": "Draw vector",
+      "actions": [
+        {"type": "show_creation", "target": "vector_v", "run_time": 1.0},
+        {"type": "fade_in", "target": "endpoint", "run_time": 0.4},
+        {"type": "highlight", "target": "vector_v", "color": "YELLOW", "run_time": 0.5}
+      ]
+    },
+    {
+      "name": "Show component",
+      "actions": [{"type": "show_creation", "target": "x_component", "run_time": 0.8}]
+    }
+  ]
+}
+

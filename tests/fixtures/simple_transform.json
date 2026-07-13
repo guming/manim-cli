@@ -1,0 +1,37 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.0",
+  "name": "simple_transform",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {
+      "id": "circle",
+      "type": "Circle",
+      "args": {"radius": 1.0},
+      "style": {"color": "#58C4DD"}
+    },
+    {
+      "id": "square",
+      "type": "Square",
+      "args": {"side_length": 2.0},
+      "style": {"color": "#FC6255"}
+    }
+  ],
+  "steps": [
+    {
+      "name": "Show circle",
+      "actions": [{"type": "show_creation", "target": "circle", "run_time": 1.0}]
+    },
+    {
+      "name": "Transform circle to square",
+      "actions": [{"type": "transform", "target": "circle", "to": "square", "run_time": 1.0}]
+    }
+  ]
+}
+

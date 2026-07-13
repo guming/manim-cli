@@ -1,0 +1,5 @@
+click
+manim
+pydantic>=2
+pytest
+typing-extensions

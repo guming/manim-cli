@@ -1,0 +1,18 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.0",
+  "name": "out_of_bounds_scene",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {"id": "off", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [100, 100, 0]}}
+  ],
+  "steps": [
+    {"id": "s1", "name": "show off-screen", "actions": [{"type": "add", "target": "off"}]}
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.0",
+  "name": "overlap_scene",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {"id": "a", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
+    {"id": "b", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [0, 0, 0]}}
+  ],
+  "steps": [
+    {"id": "s1", "name": "show both", "actions": [{"type": "add", "target": "a"}, {"type": "add", "target": "b"}]}
+  ]
+}

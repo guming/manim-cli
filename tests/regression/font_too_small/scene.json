@@ -1,0 +1,18 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.0",
+  "name": "font_too_small_scene",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {"id": "tiny", "type": "Text", "args": {"text": "tiny text", "font_size": 12}, "layout": {"slot": "title"}}
+  ],
+  "steps": [
+    {"id": "s1", "name": "show tiny", "actions": [{"type": "write", "target": "tiny"}]}
+  ]
+}
