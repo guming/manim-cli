@@ -1,0 +1,36 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.uv-cache/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# manim-cli generated project artifacts
+generated/
+renders/
+diagnostics/
+media/
+videos/
+
+# Temporary files
+*.tmp
+*.log
