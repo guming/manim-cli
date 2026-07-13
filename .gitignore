@@ -1,5 +1,5 @@
 # Python caches
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
@@ -34,3 +34,12 @@ videos/
 # Temporary files
 *.tmp
 *.log
+
+# Examples
+examples/
+
+# Opencode
+.opencode/
+
+
+
