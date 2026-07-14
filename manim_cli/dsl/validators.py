@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from manim_cli.dsl.encoders import HEX_RE
 from manim_cli.dsl.cost import scene_cost
+from manim_cli.dsl.knowledge import policy_warnings
 from manim_cli.dsl.layout import layout_warnings
 from manim_cli.dsl.models import (
     COLORS,
@@ -20,6 +21,8 @@ from manim_cli.dsl.models import (
     ActionDef,
     SceneDef,
 )
+from manim_cli.dsl.splitting import storyboard_split_plans
+from manim_cli.dsl.templates import resolve_layout_roles, unresolved_layout_role_warnings
 from manim_cli.jsonio import Diagnostic, error_result, load_json, ok_result
 from manim_cli.planning.alignment import alignment_warnings
 from manim_cli.planning.pedagogy import load_plan, load_storyboard, pedagogy_warnings
@@ -44,6 +47,9 @@ def validate_scene_data(data: Any, file: str = "scene.json", base_dir: Optional[
 
 
 def parse_and_validate_scene_data(data: Any, file: str = "scene.json", base_dir: Optional[Path] = None, quality_gate: str = "off") -> ParsedSceneValidation:
+    version_error = validate_versioned_schema_fields(data, file)
+    if version_error:
+        return ParsedSceneValidation(version_error)
     try:
         scene = SceneDef.model_validate(data)
     except ValidationError as exc:
@@ -52,6 +58,7 @@ def parse_and_validate_scene_data(data: Any, file: str = "scene.json", base_dir:
     semantic = semantic_validate(scene, file=file, base_dir=base_dir)
     if semantic:
         return ParsedSceneValidation(semantic, scene)
+    scene = resolve_layout_roles(scene)
     warnings = quality_warnings(scene, base_dir=base_dir) if quality_gate != "off" else []
     if quality_gate in ("strict", "final") and warnings:
         first = warnings[0]
@@ -72,21 +79,52 @@ def parse_and_validate_scene_data(data: Any, file: str = "scene.json", base_dir:
 
 
 def parse_scene_file(path: Path) -> SceneDef:
-    return SceneDef.model_validate(load_json(path))
+    return parse_scene_data(load_json(path))
 
 
 def parse_scene_data(data: Any) -> SceneDef:
-    return SceneDef.model_validate(data)
+    version_error = validate_versioned_schema_fields(data)
+    if version_error:
+        raise ValueError(version_error["message"])
+    return resolve_layout_roles(SceneDef.model_validate(data))
 
 
 def quality_warnings(scene: SceneDef, base_dir: Optional[Path] = None) -> list[Dict[str, Any]]:
     warnings: list[Dict[str, Any]] = []
+    warnings.extend(unresolved_layout_role_warnings(scene))
+    warnings.extend(storyboard_split_plans(scene))
+    warnings.extend(policy_warnings(scene, base_dir))
     warnings.extend(layout_warnings(scene))
     plan = load_plan(base_dir, scene.plan_ref)
     storyboard = load_storyboard(base_dir, scene.storyboard_ref)
     warnings.extend(pedagogy_warnings(scene, plan, storyboard))
     warnings.extend(alignment_warnings(scene, plan, storyboard))
     return warnings
+
+
+def validate_versioned_schema_fields(data: Any, file: str = "scene.json") -> Optional[Diagnostic]:
+    if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    if version == "1.0":
+        if "layout_template" in data:
+            return error_result(
+                "validate",
+                "unknown_field",
+                "Extra inputs are not permitted",
+                location={"file": file, "path": "$.layout_template"},
+                details={"field": "layout_template", "version": version},
+            )
+        for index, mob in enumerate(data.get("mobjects", [])):
+            if isinstance(mob, dict) and "layout_role" in mob:
+                return error_result(
+                    "validate",
+                    "unknown_field",
+                    "Extra inputs are not permitted",
+                    location={"file": file, "path": f"$.mobjects[{index}].layout_role"},
+                    details={"field": "layout_role", "version": version},
+                )
+    return None
 
 
 def semantic_validate(scene: SceneDef, file: str = "scene.json", base_dir: Optional[Path] = None) -> Optional[Diagnostic]:

@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -6,7 +7,8 @@ from click.testing import CliRunner
 from manim_cli.cli import main
 from manim_cli.dsl.analysis import analyze_scene
 from manim_cli.dsl.compiler import compile_scene_file
-from manim_cli.dsl.layout import estimate_bbox, layout_warnings
+from manim_cli.dsl.layout import BBox, estimate_bbox, layout_warnings, overlaps, slot_region
+from manim_cli.dsl.models import RESERVED_FUTURE_MOBJECT_FIELDS, RESERVED_FUTURE_SCENE_FIELDS, SCENE_SCHEMA_VERSION, SUPPORTED_SCENE_VERSIONS
 from manim_cli.dsl.names import safe_var_name
 from manim_cli.dsl.timeline import build_timeline
 from manim_cli.dsl.validators import parse_scene_file, validate_scene_data, validate_scene_file
@@ -34,6 +36,76 @@ def test_unknown_field_rejected():
     result = validate_scene_data(data)
     assert not result["ok"]
     assert result["error_type"] == "unknown_field"
+
+
+def test_layout_fields_remain_rejected_in_schema_v1():
+    assert SCENE_SCHEMA_VERSION == "1.1"
+    assert SUPPORTED_SCENE_VERSIONS == ("1.0", "1.1")
+    assert "layout_template" in RESERVED_FUTURE_SCENE_FIELDS
+    assert "layout_role" in RESERVED_FUTURE_MOBJECT_FIELDS
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["layout_template"] = "plot_with_bottom_formula"
+    result = validate_scene_data(data)
+    assert not result["ok"]
+    assert result["error_type"] == "unknown_field"
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["mobjects"][0]["layout_role"] = "plot.primary"
+    result = validate_scene_data(data)
+    assert not result["ok"]
+    assert result["error_type"] == "unknown_field"
+
+
+def test_schema_v11_accepts_explicit_layout_template_and_role():
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"][0]["layout_role"] = "formula.primary"
+    data["mobjects"][0]["type"] = "Tex"
+    data["mobjects"][0]["args"] = {"tex": "x^2", "font_size": 48}
+    result = validate_scene_data(data)
+    assert result["ok"], result
+
+
+def test_schema_v11_accepts_plot_full_template():
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_full"
+    data["mobjects"][0]["layout_role"] = "plot.primary"
+    result = validate_scene_data(data)
+    assert result["ok"], result
+
+
+def test_schema_v11_accepts_fallback_templates():
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    for template in ("plot_with_side_formula", "plot_then_formula", "formula_then_caption"):
+        data["layout_template"] = template
+        result = validate_scene_data(data)
+        assert result["ok"], result
+
+
+def test_schema_v11_rejects_invalid_layout_template_and_role():
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "unknown_template"
+    result = validate_scene_data(data)
+    assert not result["ok"]
+    assert result["error_type"] == "invalid_enum"
+
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["mobjects"][0]["layout_role"] = "plot.fake"
+    result = validate_scene_data(data)
+    assert not result["ok"]
+    assert result["error_type"] == "invalid_enum"
+
+
+def test_unsupported_scene_version_rejected():
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "2.0"
+    result = validate_scene_data(data)
+    assert not result["ok"]
+    assert result["error_type"] == "invalid_enum"
 
 
 def test_graph_rejected():
@@ -76,6 +148,386 @@ def test_axes_emit_uses_manim_community_length_args(tmp_path):
     assert "y_length=" in axes_line
     assert "width=" not in axes_line
     assert "height=" not in axes_line
+
+
+def test_compile_layout_fits_tex_to_slot_height(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 120},
+            "layout": {"slot": "bottom_formula"},
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    result = compile_scene_file(scene_path, tmp_path / "out", use_cache=False)
+    assert result["ok"], result
+    changes = result["layout_changes"]
+    fit_change = next(change for change in changes if change["object"] == "formula" and change["change"] == "fit_to_region")
+    assert fit_change["to"]["height"] > 0
+    assert "height" in fit_change["fit_dimensions"]
+    assert fit_change["height_scale"] < 1
+    assert fit_change["region"]["top"] > fit_change["region"]["bottom"]
+    assert any(warning["type"] == "layout_material_scale_down" and warning["object"] == "formula" for warning in result["warnings"])
+    source = (tmp_path / "out" / "scene.py").read_text(encoding="utf-8")
+    assert ".scale(" in source
+
+
+def test_compile_v11_role_derives_layout_slot(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": "x^2", "font_size": 48},
+            "layout_role": "formula.primary",
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    result = compile_scene_file(scene_path, tmp_path / "out", use_cache=False)
+    assert result["ok"], result
+    assert any(change["change"] == "layout_template_selected" and change["layout_template"] == "plot_with_bottom_formula" for change in result["layout_changes"])
+    placement = next(change for change in result["layout_changes"] if change.get("object") == "formula" and change["change"] == "layout_role_placement")
+    assert placement["layout_role"] == "formula.primary"
+    assert placement["actual_slot"] == "bottom_formula"
+    source = (tmp_path / "out" / "scene.py").read_text(encoding="utf-8")
+    assert "mobj_formula.move_to(np.array([0.0, -2.28, 0.0]))" in source
+
+
+def test_compile_plot_full_role_maps_to_main(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_full"
+    data["mobjects"] = [
+        {
+            "id": "plot_marker",
+            "type": "Dot",
+            "args": {"point": [0, 0, 0]},
+            "layout_role": "plot.primary",
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "plot", "actions": [{"type": "add", "target": "plot_marker"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    result = compile_scene_file(scene_path, tmp_path / "out", use_cache=False)
+    assert result["ok"], result
+    placement = next(change for change in result["layout_changes"] if change.get("object") == "plot_marker" and change["change"] == "layout_role_placement")
+    assert placement["layout_template"] == "plot_full"
+    assert placement["actual_slot"] == "main"
+
+
+def test_formula_overflow_selects_fallback_template(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"\frac{x}{y}", "font_size": 50},
+            "layout_role": "formula.primary",
+        },
+        {
+            "id": "caption",
+            "type": "Text",
+            "args": {"text": "caption", "font_size": 32},
+            "layout_role": "caption.conclusion",
+        },
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}, {"type": "write", "target": "caption"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+
+    validation = validate_scene_data(data, quality_gate="relaxed")
+    assert validation["ok"], validation
+    assert any(warning["type"] == "layout_fallback_selected" and warning["to"] == "formula_then_caption" for warning in validation["warnings"])
+
+    result = compile_scene_file(scene_path, tmp_path / "out", use_cache=False)
+    assert result["ok"], result
+    assert any(change["change"] == "layout_fallback_selected" and change["from"] == "plot_with_bottom_formula" and change["to"] == "formula_then_caption" for change in result["layout_changes"])
+    placement = next(change for change in result["layout_changes"] if change.get("object") == "formula" and change["change"] == "layout_role_placement")
+    assert placement["layout_template"] == "formula_then_caption"
+    assert placement["actual_slot"] == "main"
+
+
+def test_formula_overflow_all_fallbacks_emit_split_plan(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    very_long_formula = " + ".join([r"\frac{x_i}{y_i}"] * 30)
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": very_long_formula, "font_size": 90},
+            "layout_role": "formula.primary",
+        },
+        {
+            "id": "caption",
+            "type": "Text",
+            "args": {"text": "caption", "font_size": 32},
+            "layout_role": "caption.conclusion",
+        },
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}, {"type": "write", "target": "caption"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+
+    validation = validate_scene_data(data, quality_gate="relaxed")
+    assert validation["ok"], validation
+    assert any(warning["type"] == "layout_template_fit_failed" and warning["object"] == "formula" for warning in validation["warnings"])
+    split_warning = next(warning for warning in validation["warnings"] if warning["type"] == "storyboard_split_required")
+    assert split_warning["step"] == "s1"
+    assert split_warning["moved_object_ids"] == ["caption", "formula"]
+
+    result = compile_scene_file(scene_path, tmp_path / "out", use_cache=False)
+    assert result["ok"], result
+    assert any(change["change"] == "layout_template_fit_failed" and change["object"] == "formula" for change in result["layout_changes"])
+    split_change = next(change for change in result["layout_changes"] if change["change"] == "storyboard_split_plan")
+    assert split_change["step"] == "s1"
+    assert split_change["timing_policy"] == "preserve_original_step_duration_until_explicit_split"
+
+
+def test_split_layout_cli_writes_split_scene_without_overwriting_source(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    very_long_formula = " + ".join([r"\frac{x_i}{y_i}"] * 30)
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": very_long_formula, "font_size": 90},
+            "layout_role": "formula.primary",
+        },
+        {
+            "id": "caption",
+            "type": "Text",
+            "args": {"text": "caption", "font_size": 32},
+            "layout_role": "caption.conclusion",
+        },
+    ]
+    data["steps"] = [
+        {
+            "id": "s1",
+            "name": "formula",
+            "actions": [{"type": "write", "target": "formula"}, {"type": "write", "target": "caption"}],
+            "wait_after": 0.5,
+        }
+    ]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    original = scene_path.read_text(encoding="utf-8")
+    out_path = tmp_path / "scene.split.json"
+
+    result = CliRunner().invoke(main, ["split-layout", str(scene_path), "--out", str(out_path)])
+    assert result.exit_code == 0, result.output
+    assert scene_path.read_text(encoding="utf-8") == original
+    split_data = load_json(out_path)
+    assert len(split_data["steps"]) == 2
+    assert [action["target"] for action in split_data["steps"][0]["actions"]] == ["formula"]
+    assert [action["target"] for action in split_data["steps"][1]["actions"]] == ["caption"]
+    assert split_data["steps"][1]["wait_after"] == 0.5
+    validation = validate_scene_file(out_path)
+    assert validation["ok"], validation
+    compile_result = compile_scene_file(out_path, tmp_path / "compiled", use_cache=False)
+    assert compile_result["ok"], compile_result
+
+
+def test_local_policy_warning_and_knowledge_retrieval(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 48},
+            "layout_role": "formula.primary",
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    write_json_text(tmp_path / "scene.json", data)
+    (tmp_path / "policies").mkdir()
+    write_json_text(
+        tmp_path / "policies" / "tall_formula.json",
+        {
+            "policy_id": "tall_formula_bottom_region_safety",
+            "type": "diagnostic",
+            "when": {
+                "layout_template": "plot_with_bottom_formula",
+                "role": "formula.primary",
+                "formula_contains_any": [r"\lim", r"\frac"],
+            },
+            "prompt_summary": "Tall formula in bottom region needs extra care.",
+        },
+    )
+    (tmp_path / "knowledge").mkdir()
+    write_json_text(
+        tmp_path / "knowledge" / "derivative_geometry.json",
+        {
+            "id": "derivative_geometry",
+            "description": "Derivative geometry scenes.",
+            "match": {"formula_features": ["limit_difference_quotient"], "mobject_types": ["Tex"]},
+            "required_roles": ["formula.primary"],
+            "prompt_summary": "Prefer separated formula layout for derivative limits.",
+        },
+    )
+
+    result = validate_scene_file(tmp_path / "scene.json", quality_gate="relaxed")
+    assert result["ok"], result
+    policy_warning = next(warning for warning in result["warnings"] if warning["type"] == "layout_memory_policy_applied")
+    assert policy_warning["policy_id"] == "tall_formula_bottom_region_safety"
+    qa = run_qa(tmp_path / "scene.json", profile="relaxed")
+    assert qa["ok"], qa
+    assert any(issue["type"] == "layout_memory_policy_applied" for issue in qa["issues"])
+
+    cli = CliRunner().invoke(main, ["knowledge", "retrieve", str(tmp_path / "scene.json"), "--base-dir", str(tmp_path), "--top-k", "2"])
+    assert cli.exit_code == 0, cli.output
+    payload = json.loads(cli.output)
+    assert payload["ok"]
+    assert any(match["document"].get("id") == "derivative_geometry" for match in payload["matches"])
+
+
+def test_knowledge_record_failure_writes_inbox_without_retrieval(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["mobjects"] = [
+        {"id": "a", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
+        {"id": "b", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
+    ]
+    data["steps"] = [{"id": "s1", "name": "show both", "actions": [{"type": "add", "target": "a"}, {"type": "add", "target": "b"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+
+    result = CliRunner().invoke(main, ["knowledge", "record-failure", str(scene_path), "--base-dir", str(tmp_path), "--profile", "strict", "--symptom", "overlapping circles"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    failure_path = Path(payload["failure_memory"])
+    assert failure_path.exists()
+    assert failure_path.parent == tmp_path / "failures" / "inbox"
+    memory = load_json(failure_path)
+    assert memory["symptom"] == "overlapping circles"
+    assert memory["severity"] == "blocking"
+    assert "layout_overlap" in memory["evidence"]["issue_types"]
+
+    retrieve = CliRunner().invoke(main, ["knowledge", "retrieve", str(scene_path), "--base-dir", str(tmp_path), "--top-k", "5"])
+    assert retrieve.exit_code == 0, retrieve.output
+    retrieved = json.loads(retrieve.output)
+    assert not any(match["document"].get("failure_id") == memory["failure_id"] for match in retrieved["matches"])
+
+
+def test_knowledge_promote_reviewed_failure_to_policy(tmp_path):
+    reviewed_dir = tmp_path / "failures" / "reviewed"
+    inbox_dir = tmp_path / "failures" / "inbox"
+    reviewed_dir.mkdir(parents=True)
+    inbox_dir.mkdir(parents=True)
+    failure = {
+        "failure_id": "derivative_formula_caption_overlap_2026_07",
+        "scene_type": "derivative_geometry",
+        "symptom": "formula overlaps caption",
+        "trigger": {
+            "layout_template": "plot_with_bottom_formula",
+            "visible_roles": ["formula.primary", "caption.conclusion"],
+            "formula_features": ["limit_difference_quotient"],
+        },
+        "evidence": {"issue_types": ["layout_overlap"]},
+        "severity": "blocking",
+        "confidence": "high",
+        "prompt_summary": "Tall derivative formula should avoid crowded bottom layout.",
+    }
+    reviewed_path = reviewed_dir / "failure.json"
+    inbox_path = inbox_dir / "failure.json"
+    write_json_text(reviewed_path, failure)
+    write_json_text(inbox_path, failure)
+
+    rejected = CliRunner().invoke(main, ["knowledge", "promote-policy", str(inbox_path), "--base-dir", str(tmp_path)])
+    assert rejected.exit_code != 0
+    assert "unreviewed_failure" in rejected.output
+
+    promoted = CliRunner().invoke(main, ["knowledge", "promote-policy", str(reviewed_path), "--base-dir", str(tmp_path)])
+    assert promoted.exit_code == 0, promoted.output
+    payload = json.loads(promoted.output)
+    policy_path = Path(payload["policy"])
+    policy = load_json(policy_path)
+    assert policy["policy_id"] == "policy_derivative_formula_caption_overlap_2026_07"
+    assert policy["source_failure_id"] == failure["failure_id"]
+    assert policy["when"]["formula_features_any"] == ["limit_difference_quotient"]
+
+    scene = load_json(FIXTURES / "simple_transform.json")
+    scene["version"] = "1.1"
+    scene["layout_template"] = "plot_with_bottom_formula"
+    scene["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 48},
+            "layout_role": "formula.primary",
+        },
+        {
+            "id": "caption",
+            "type": "Text",
+            "args": {"text": "caption", "font_size": 32},
+            "layout_role": "caption.conclusion",
+        },
+    ]
+    scene["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}, {"type": "write", "target": "caption"}]}]
+    write_json_text(tmp_path / "scene.json", scene)
+    qa = run_qa(tmp_path / "scene.json", profile="relaxed")
+    assert any(issue["type"] == "layout_memory_policy_applied" and issue["details"]["policy_id"] == policy["policy_id"] for issue in qa["issues"])
+
+
+def test_compile_explicit_layout_overrides_v11_role(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": "x^2", "font_size": 48},
+            "layout_role": "formula.primary",
+            "layout": {"slot": "title"},
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    result = compile_scene_file(scene_path, tmp_path / "out", use_cache=False)
+    assert result["ok"], result
+    source = (tmp_path / "out" / "scene.py").read_text(encoding="utf-8")
+    assert "mobj_formula.move_to(np.array([0.0, 3.36, 0.0]))" in source
+
+
+def test_unmapped_v11_role_warns_without_moving(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["mobjects"][0]["layout_role"] = "diagram.primary"
+    result = validate_scene_data(data, quality_gate="relaxed")
+    assert result["ok"], result
+    assert any(warning["type"] == "layout_role_unmapped" and warning["object"] == "circle" for warning in result["warnings"])
+
+
+def test_compile_cache_key_includes_generator_hash(tmp_path):
+    out = tmp_path / "generated"
+    first = compile_scene_file(FIXTURES / "simple_transform.json", out, use_cache=True)
+    assert first["ok"], first
+    assert not first["cached"]
+    assert first["manifest"]["generator_hash"]
+    cache = load_json(out / ".compile-cache.json")
+    assert cache["generator_hash"] == first["manifest"]["generator_hash"]
+    assert "compile_warnings" in cache
+    second = compile_scene_file(FIXTURES / "simple_transform.json", out, use_cache=True)
+    assert second["ok"], second
+    assert second["cached"]
+    assert second["cache_key"] == first["cache_key"]
+    assert second["manifest"]["generator_hash"] == first["manifest"]["generator_hash"]
 
 
 def test_compile_collects_precise_manim_imports(tmp_path):
@@ -202,7 +654,7 @@ def test_qa_strict_blocks_text_solid_overlap(tmp_path):
     assert not strict["ok"]
 
 
-def test_qa_tex_overlap_unknown_static_does_not_fail_strict(tmp_path):
+def test_qa_tex_overlap_unknown_static_fails_strict(tmp_path):
     data = load_json(FIXTURES / "simple_transform.json")
     data["mobjects"] = [
         {"id": "a", "type": "Tex", "args": {"tex": "\\frac{a}{b}", "font_size": 48}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
@@ -211,8 +663,8 @@ def test_qa_tex_overlap_unknown_static_does_not_fail_strict(tmp_path):
     data["steps"] = [{"id": "s1", "name": "show tex", "actions": [{"type": "write", "target": "a"}, {"type": "write", "target": "b"}]}]
     write_json_text(tmp_path / "scene.json", data)
     result = run_qa(tmp_path / "scene.json", profile="strict")
-    assert result["ok"], result
-    assert any(issue["type"] == "layout_needs_visual_qa" for issue in result["issues"])
+    assert not result["ok"], result
+    assert any(issue["type"] == "layout_overlap" and issue["severity"] == "error" for issue in result["issues"])
 
 
 def test_qa_timing_drift_and_feedback(tmp_path):
@@ -309,6 +761,46 @@ def test_qa_layout_font_too_small(tmp_path):
     assert any(i["type"] == "layout_font_too_small" for i in result["issues"])
 
 
+def test_bottom_formula_and_caption_slots_do_not_overlap():
+    scene = parse_scene_file(FIXTURES / "simple_transform.json")
+    bottom_formula = slot_region(scene, "bottom_formula")
+    caption = slot_region(scene, "caption")
+    assert not overlaps(bottom_formula, caption)
+
+
+def test_tex_conservative_height_for_limit_fraction():
+    scene = parse_scene_file(FIXTURES / "simple_transform.json")
+    simple = {"id": "simple", "type": "Tex", "args": {"tex": "x^2", "font_size": 48}}
+    tall = {"id": "tall", "type": "Tex", "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 48}}
+    simple_scene = scene.__class__.model_validate({**scene.model_dump(), "mobjects": [simple]})
+    tall_scene = scene.__class__.model_validate({**scene.model_dump(), "mobjects": [tall]})
+    simple_box = estimate_bbox(simple_scene, simple_scene.mobjects[0])
+    tall_box = estimate_bbox(tall_scene, tall_scene.mobjects[0])
+    assert simple_box is not None
+    assert tall_box is not None
+    assert tall_box.height > simple_box.height * 2
+
+
+def test_measured_tex_bbox_overrides_heuristic():
+    from manim_cli.render.bbox_probe import BBoxProbeResult
+
+    scene = parse_scene_file(FIXTURES / "simple_transform.json")
+    scene = scene.__class__.model_validate(
+        {
+            **scene.model_dump(),
+            "mobjects": [
+                {"id": "eq", "type": "Tex", "args": {"tex": "x^2", "font_size": 48}, "position": {"mode": "absolute", "point": [1, 2, 0]}}
+            ],
+        }
+    )
+    box = estimate_bbox(scene, scene.mobjects[0], tex_probe_results={"eq": BBoxProbeResult(status="measured", bbox=BBox(-2, -0.75, 2, 0.75), method="latex_dvisvgm")})
+    assert box is not None
+    assert box.confidence == "high"
+    assert box.method == "latex_dvisvgm"
+    assert box.width == 4
+    assert box.height == 1.5
+
+
 def test_qa_layout_confidence_gated_overlap(tmp_path):
     data = load_json(FIXTURES / "simple_transform.json")
     # Two Text objects (medium confidence) slightly overlapping → no warning (small overlap).
@@ -327,6 +819,67 @@ def test_qa_layout_confidence_gated_overlap(tmp_path):
     assert any(i["type"] == "layout_overlap" for i in result["issues"])
 
 
+def test_qa_allows_plot_geometry_overlay(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["mobjects"] = [
+        {"id": "axes", "type": "Axes", "args": {"x_range": [-1, 2, 1], "y_range": [-1, 2, 1], "width": 4.0, "height": 4.0}},
+        {"id": "curve", "type": "Line", "args": {"start": [0, 0, 0], "end": [1, 1, 0], "coordinate_space": "plane", "axes": "axes"}},
+        {"id": "point", "type": "Dot", "args": {"point": [0.5, 0.5, 0], "coordinate_space": "plane", "axes": "axes"}},
+    ]
+    data["steps"] = [{"id": "s1", "name": "plot", "actions": [{"type": "add", "target": "axes"}, {"type": "add", "target": "curve"}, {"type": "add", "target": "point"}]}]
+    write_json_text(tmp_path / "scene.json", data)
+    result = run_qa(tmp_path / "scene.json", profile="strict")
+    assert result["ok"], result
+    assert not any(issue["type"] == "layout_overlap" for issue in result["issues"])
+
+
+def test_qa_blocks_tex_inside_plot_area(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["mobjects"] = [
+        {"id": "axes", "type": "Axes", "args": {"x_range": [-1, 2, 1], "y_range": [-1, 2, 1], "width": 4.0, "height": 4.0}},
+        {"id": "formula", "type": "Tex", "args": {"tex": "f'(a)", "font_size": 48}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
+    ]
+    data["steps"] = [{"id": "s1", "name": "bad formula", "actions": [{"type": "add", "target": "axes"}, {"type": "write", "target": "formula"}]}]
+    write_json_text(tmp_path / "scene.json", data)
+    result = run_qa(tmp_path / "scene.json", profile="strict")
+    assert not result["ok"], result
+    assert any(issue["type"] == "layout_overlap" for issue in result["issues"])
+
+
+def test_derivative_example_layout_and_geometry():
+    scene_path = Path(__file__).parents[1] / "examples" / "derivative_geometric_meaning" / "scene.json"
+    result = run_qa(scene_path, profile="strict")
+    assert result["ok"], result
+    blocking_overlaps = [issue for issue in result["issues"] if issue["type"] == "layout_overlap"]
+    assert blocking_overlaps == []
+
+    data = load_json(scene_path)
+    objects = {mob["id"]: mob for mob in data["mobjects"]}
+    curve_segments = sorted(
+        [mob for mob in objects.values() if mob["id"].startswith("curve_")],
+        key=lambda mob: mob["args"]["start"][0],
+    )
+    assert len(curve_segments) == 67
+    assert curve_segments[0]["args"]["start"][:2] == [-1.5, 2.25]
+    assert curve_segments[-1]["args"]["end"][:2] == [1.8, 3.24]
+    for segment in curve_segments:
+        for point_key in ("start", "end"):
+            x, y, _ = segment["args"][point_key]
+            assert y == round(x * x, 4)
+
+    before_p = objects["curve_50"]["args"]
+    after_p = objects["curve_66"]["args"]
+    left_slope = slope(before_p["start"], before_p["end"])
+    right_slope = slope(after_p["start"], after_p["end"])
+    angle_change = abs(math.degrees(math.atan(right_slope) - math.atan(left_slope)))
+    assert angle_change < 1.0
+
+    tangent = objects["tangent_line"]["args"]
+    assert slope(tangent["start"], tangent["end"]) == 2.0
+    assert objects["limit_formula"]["layout"]["slot"] == "bottom_formula"
+    assert "position" not in objects["limit_formula"]
+
+
 def test_qa_layout_custom_region_max_dims(tmp_path):
     from manim_cli.dsl.layout import bbox_from_region
     box = bbox_from_region({"left": -5, "bottom": -2, "max_width": 10, "max_height": 4})
@@ -335,12 +888,39 @@ def test_qa_layout_custom_region_max_dims(tmp_path):
     assert box.top == 2.0
 
 
+def slope(start, end):
+    return round((end[1] - start[1]) / (end[0] - start[0]), 10)
+
+
 def test_qa_cli_command(tmp_path):
     scene_path = tmp_path / "scene.json"
     write_json_text(scene_path, load_json(FIXTURES / "simple_transform.json"))
     result = CliRunner().invoke(main, ["qa", str(scene_path), "--profile", "relaxed"])
     assert result.exit_code == 0, result.output
     assert '"phase": "qa"' in result.output
+
+
+def test_migrate_layout_cli_outputs_v11_template_and_roles(tmp_path):
+    source_path = Path("examples/derivative_geometric_meaning/scene.json")
+    original = source_path.read_text(encoding="utf-8")
+    out_path = tmp_path / "scene.v1_1.json"
+    result = CliRunner().invoke(main, ["migrate-layout", str(source_path), "--to-version", "1.1", "--out", str(out_path)])
+    assert result.exit_code == 0, result.output
+    assert source_path.read_text(encoding="utf-8") == original
+    migrated = load_json(out_path)
+    assert migrated["version"] == "1.1"
+    assert migrated["layout_template"] == "plot_with_bottom_formula"
+    objects = {mobject["id"]: mobject for mobject in migrated["mobjects"]}
+    assert objects["title"]["layout_role"] == "title.primary"
+    assert objects["axes"]["layout_role"] == "plot.axes"
+    assert objects["limit_formula"]["layout_role"] == "formula.primary"
+    assert objects["conclusion"]["layout_role"] == "caption.conclusion"
+    validation = validate_scene_file(out_path)
+    assert validation["ok"], validation
+    qa = run_qa(out_path, profile="strict")
+    assert qa["ok"], qa
+    compile_result = compile_scene_file(out_path, tmp_path / "compiled", use_cache=False)
+    assert compile_result["ok"], compile_result
 
 
 def test_render_qa_gate_blocks_before_manim(tmp_path):
@@ -391,8 +971,8 @@ def test_layout_slot_compiles_scale_to_fit_width(tmp_path):
     assert result["ok"], result
     source = (tmp_path / "generated" / "scene.py").read_text(encoding="utf-8")
     assert "move_to(np.array" in source
-    assert "scale_to_fit_width" in source
-    assert result["layout_changes"]
+    assert "scale_to_fit_width" in source or ".scale(" in source
+    assert any(change["object"] == "long_caption" and change["change"] == "fit_to_region" for change in result["layout_changes"])
 
 
 def test_step_level_layout_action_compiles(tmp_path):

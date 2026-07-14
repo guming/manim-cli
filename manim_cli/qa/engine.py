@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from manim_cli.dsl.analysis import analyze_scene
+from manim_cli.dsl.knowledge import policy_warnings
 from manim_cli.dsl.layout import layout_warnings
+from manim_cli.dsl.splitting import storyboard_split_plans
+from manim_cli.dsl.templates import unresolved_layout_role_warnings
 from manim_cli.dsl.validators import parse_and_validate_scene_data
 from manim_cli.jsonio import Diagnostic, error_result, load_json, ok_result
 from manim_cli.planning.alignment import alignment_warnings
@@ -40,6 +43,9 @@ def run_qa(
     storyboard = load_direct_storyboard(storyboard_path) if storyboard_path else load_storyboard(scene_path.parent, scene.storyboard_ref)
 
     warnings = []
+    warnings.extend(unresolved_layout_role_warnings(scene))
+    warnings.extend(storyboard_split_plans(scene))
+    warnings.extend(policy_warnings(scene, scene_path.parent))
     warnings.extend(layout_warnings(scene))
     warnings.extend(pedagogy_warnings(scene, plan, storyboard))
     warnings.extend(alignment_warnings(scene, plan, storyboard))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import py_compile
 import json
+import py_compile
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Set
@@ -14,9 +14,14 @@ from manim_cli.dsl.models import COLORS, DIRECTIONS, RATE_FUNCS, SceneDef
 from manim_cli.dsl.names import safe_var_name
 from manim_cli.dsl.optimizer import MERGEABLE_ACTIONS, collect_mergeable_actions, optimize_scene
 from manim_cli.dsl.registry import ACTION_REGISTRY, MOBJECT_REGISTRY, emit_position, emit_style
+from manim_cli.dsl.splitting import storyboard_split_plans
+from manim_cli.dsl.templates import layout_template_diagnostics
 from manim_cli.dsl.validators import parse_and_validate_scene_data
 from manim_cli.dsl.writer import CodeWriter
 from manim_cli.jsonio import Diagnostic, error_result, load_json, ok_result, write_json
+from manim_cli.render.bbox_probe import probe_scene_tex_bboxes
+
+MATERIAL_LAYOUT_SCALE_THRESHOLD = 0.9
 
 
 class CompileContext:
@@ -24,9 +29,12 @@ class CompileContext:
         self.scene = scene
         self.id_to_var: Dict[str, str] = {}
         self.var_to_id: Dict[str, str] = {}
-        self.layout_changes: list[Dict[str, Any]] = []
+        self.layout_changes: list[Dict[str, Any]] = layout_template_diagnostics(scene)
+        self.layout_changes.extend({"change": "storyboard_split_plan", **plan} for plan in storyboard_split_plans(scene))
+        self.compile_warnings: list[Dict[str, Any]] = []
         self.current_step_metadata: Dict[str, Any] = {}
         self.template_by_signature: Dict[str, str] = {}
+        self.tex_probe_results = probe_scene_tex_bboxes(scene)
         used: Set[str] = set()
         for mob in scene.mobjects:
             var_name = safe_var_name(mob.id, used)
@@ -85,12 +93,16 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
     scene_hash = scene_hash or content_hash(scene_canonical_json(scene).encode("utf-8"))
     manifest = build_manifest(scene_hash, profile)
     manim_version = manifest.get("manim_version") or "unknown"
-    cache_key = content_hash(f"{scene_hash}:{profile}:{manim_cli_version}:{manim_version}".encode("utf-8"))
+    generator_hash = compiler_generator_hash()
+    manifest["generator_hash"] = generator_hash
+    cache_key = content_hash(f"{scene_hash}:{profile}:{manim_cli_version}:{manim_version}:{generator_hash}".encode("utf-8"))
 
     if use_cache and cache_path.exists() and scene_py_path.exists() and source_map_path.exists():
         cached = load_json(cache_path)
         if cached.get("cache_key") == cache_key:
             manifest = write_build_manifest(manifest_path, scene_hash, profile)
+            manifest["generator_hash"] = generator_hash
+            write_json(manifest_path, manifest)
             return ok_result(
                 "compile",
                 scene_py=str(scene_py_path),
@@ -101,6 +113,7 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
                 cache_key=cache_key,
                 cost=scene_cost(scene),
                 layout_changes=[],
+                warnings=cached.get("compile_warnings", []),
                 build_manifest=str(manifest_path),
                 manifest=manifest,
             )
@@ -126,8 +139,23 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
                 location={"file": str(scene_py_path), "source_map": str(source_map_path)},
             )
 
-    write_json(cache_path, {"cache_key": cache_key, "scene_hash": scene_hash, "profile": profile, "manim_cli_version": manim_cli_version, "manim_version": manim_version, "scene_py": str(scene_py_path), "source_map": str(source_map_path)})
+    write_json(
+        cache_path,
+        {
+            "cache_key": cache_key,
+            "scene_hash": scene_hash,
+            "profile": profile,
+            "manim_cli_version": manim_cli_version,
+            "manim_version": manim_version,
+            "generator_hash": generator_hash,
+            "compile_warnings": ctx.compile_warnings,
+            "scene_py": str(scene_py_path),
+            "source_map": str(source_map_path),
+        },
+    )
     manifest = write_build_manifest(manifest_path, scene_hash, profile)
+    manifest["generator_hash"] = generator_hash
+    write_json(manifest_path, manifest)
 
     return ok_result(
         "compile",
@@ -139,9 +167,21 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
         cache_key=cache_key,
         cost=scene_cost(scene),
         layout_changes=ctx.layout_changes,
+        warnings=ctx.compile_warnings,
         build_manifest=str(manifest_path),
         manifest=manifest,
     )
+
+
+def compiler_generator_hash() -> str:
+    paths = [
+        Path(__file__),
+        Path(__file__).with_name("layout.py"),
+        Path(__file__).with_name("registry.py"),
+        Path(__file__).with_name("templates.py"),
+    ]
+    payload = b"".join(path.read_bytes() for path in paths)
+    return content_hash(payload)
 
 
 def collect_imports(scene: SceneDef) -> Set[str]:
@@ -261,12 +301,51 @@ def emit_layout(var_name: str, mob: Any, ctx: CompileContext, scene: SceneDef, w
         return
     center = slot_center(scene, mob.layout.slot)
     writer.add(f"        {var_name}.move_to(np.array({list(center)!r}))", path=f"{path}.layout.slot", symbol=f"{var_name}.move_to")
-    box = estimate_bbox(scene, mob)
+    box = estimate_bbox(scene, mob, tex_probe_results=ctx.tex_probe_results)
     if mob.type in ("Text", "Tex") and box:
-        max_width = slot_max_width(scene, mob.layout.slot)
-        if box.width > max_width:
-            writer.add(f"        {var_name}.scale_to_fit_width({max_width!r})", path=f"{path}.layout", symbol=f"{var_name}.scale_to_fit_width")
-            ctx.layout_changes.append({"object": mob.id, "change": "scale_to_fit_width", "from": round(box.width, 3), "to": round(max_width, 3), "reason": f"{mob.layout.slot} slot max width exceeded", "bbox_confidence": box.confidence, "bbox_method": box.method})
+        region = slot_region(scene, mob.layout.slot)
+        max_width = region.width
+        max_height = region.height
+        width_scale = max_width / box.width if box.width > max_width else 1.0
+        height_scale = max_height / box.height if box.height > max_height else 1.0
+        scale = min(width_scale, height_scale)
+        if scale < 1.0:
+            fit_dimensions = []
+            if width_scale < 1.0:
+                fit_dimensions.append("width")
+            if height_scale < 1.0:
+                fit_dimensions.append("height")
+            writer.add(f"        {var_name}.scale({scale!r})", path=f"{path}.layout", symbol=f"{var_name}.scale")
+            change = {
+                "object": mob.id,
+                "change": "fit_to_region",
+                "slot": mob.layout.slot,
+                "region": {"left": round(region.left, 3), "bottom": round(region.bottom, 3), "right": round(region.right, 3), "top": round(region.top, 3)},
+                "fit_dimensions": fit_dimensions,
+                "from": {"width": round(box.width, 3), "height": round(box.height, 3)},
+                "to": {"width": round(max_width, 3), "height": round(max_height, 3)},
+                "scale": round(scale, 3),
+                "width_scale": round(width_scale, 3),
+                "height_scale": round(height_scale, 3),
+                "reason": f"{mob.layout.slot} slot region exceeded",
+                "bbox_confidence": box.confidence,
+                "bbox_method": box.method,
+            }
+            ctx.layout_changes.append(change)
+            if "height" in fit_dimensions and scale < MATERIAL_LAYOUT_SCALE_THRESHOLD:
+                ctx.compile_warnings.append(
+                    {
+                        "type": "layout_material_scale_down",
+                        "object": mob.id,
+                        "slot": mob.layout.slot,
+                        "fit_dimensions": fit_dimensions,
+                        "scale": round(scale, 3),
+                        "threshold": MATERIAL_LAYOUT_SCALE_THRESHOLD,
+                        "bbox_confidence": box.confidence,
+                        "bbox_method": box.method,
+                        "message": "Layout fitting reduced object scale materially; consider a larger region or splitting the content.",
+                    }
+                )
 
 
 def slot_max_width(scene: SceneDef, slot: str) -> float:

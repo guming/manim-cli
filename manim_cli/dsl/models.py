@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 class StrictBaseModel(BaseModel):
@@ -11,6 +11,34 @@ class StrictBaseModel(BaseModel):
 
 Number = Union[float, int]
 Point = List[Number]
+SCENE_SCHEMA_VERSION = "1.1"
+SUPPORTED_SCENE_VERSIONS = ("1.0", "1.1")
+RESERVED_FUTURE_SCENE_FIELDS = ("layout_template",)
+RESERVED_FUTURE_MOBJECT_FIELDS = ("layout_role",)
+LayoutTemplateName = Literal[
+    "plot_full",
+    "plot_with_bottom_formula",
+    "plot_with_side_formula",
+    "plot_then_formula",
+    "formula_then_caption",
+    "vertical_derivation",
+    "diagram_left_proof_right",
+    "coordinate_plane_with_callouts",
+    "chart_with_caption",
+    "title_definition_examples",
+]
+LayoutRoleName = Literal[
+    "plot.axes",
+    "plot.primary",
+    "plot.annotation",
+    "formula.primary",
+    "formula.secondary",
+    "caption.conclusion",
+    "title.primary",
+    "diagram.primary",
+    "proof.step",
+    "chart.primary",
+]
 
 
 class SceneConfig(StrictBaseModel):
@@ -102,6 +130,7 @@ class MobjectDef(StrictBaseModel):
     style: Optional[StyleSpec] = None
     position: Optional[PositionSpec] = None
     layout: Optional[LayoutSpec] = None
+    layout_role: Optional[LayoutRoleName] = None
     render_role: Optional[Literal["static_background"]] = None
 
 
@@ -131,12 +160,16 @@ class StepDef(StrictBaseModel):
 
 
 class SceneDef(StrictBaseModel):
+    _requested_layout_template: Optional[str] = PrivateAttr(default=None)
+    _layout_fallback_failure: Optional[Dict[str, Any]] = PrivateAttr(default=None)
+
     schema_: Optional[str] = Field(default=None, alias="$schema")
-    version: Literal["1.0"]
+    version: Literal["1.0", "1.1"]
     name: str
     description: Optional[str] = None
     plan_ref: Optional[str] = None
     storyboard_ref: Optional[str] = None
+    layout_template: Optional[LayoutTemplateName] = None
     config: SceneConfig
     mobjects: List[MobjectDef]
     steps: List[StepDef]

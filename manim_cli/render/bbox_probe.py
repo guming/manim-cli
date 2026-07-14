@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
@@ -33,7 +34,18 @@ def dvisvgm_available() -> bool:
 
 
 def probe_available() -> bool:
-    return latex_available() and dvisvgm_available()
+    return latex_available() and dvisvgm_available() and _probe_smoke_available()
+
+
+@lru_cache(maxsize=1)
+def _probe_smoke_available() -> bool:
+    if not latex_available() or not dvisvgm_available():
+        return False
+    try:
+        width, height = _compile_and_measure("x")
+    except Exception:
+        return False
+    return width > 0 and height > 0
 
 
 def probe_tex_bbox(tex: str, font_size: int = 48) -> BBoxProbeResult:
@@ -43,7 +55,9 @@ def probe_tex_bbox(tex: str, font_size: int = 48) -> BBoxProbeResult:
             missing.append("latex")
         if not dvisvgm_available():
             missing.append("dvisvgm")
-        return BBoxProbeResult(status="unavailable", bbox=None, method="dependency_missing", message=f"LaTeX bbox probe requires: {', '.join(missing)}")
+        if missing:
+            return BBoxProbeResult(status="unavailable", bbox=None, method="dependency_missing", message=f"LaTeX bbox probe requires: {', '.join(missing)}")
+        return BBoxProbeResult(status="unavailable", bbox=None, method="compilation_failed", message="LaTeX bbox probe smoke test failed.")
     try:
         pt_width, pt_height = _compile_and_measure(tex)
     except subprocess.TimeoutExpired:
