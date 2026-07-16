@@ -1,0 +1,40 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.1",
+  "name": "measured_safe",
+  "layout_template": "formula_then_caption",
+  "config": {
+    "resolution": [854, 480],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 15,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {
+      "id": "formula",
+      "type": "Tex",
+      "args": {"tex": "f'(a)=\\lim_{h\\to0}\\frac{f(a+h)-f(a)}{h}", "font_size": 42},
+      "layout_role": "formula.primary",
+      "position": {"mode": "absolute", "point": [0, 1.2, 0]}
+    },
+    {
+      "id": "caption",
+      "type": "Text",
+      "args": {"text": "The derivative is the tangent slope.", "font_size": 28},
+      "layout_role": "caption.conclusion",
+      "position": {"mode": "absolute", "point": [0, -2.4, 0]}
+    }
+  ],
+  "steps": [
+    {
+      "id": "show",
+      "name": "Show measured-safe layout",
+      "actions": [
+        {"type": "write", "target": "formula", "run_time": 0.2},
+        {"type": "write", "target": "caption", "run_time": 0.2}
+      ],
+      "wait_after": 0.1
+    }
+  ]
+}

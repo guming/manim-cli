@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Set
+from typing import Any, List, Set
 
 from manim_cli.dsl.models import SceneDef
 
@@ -73,8 +73,36 @@ def action_duration(action: object) -> float:
 
 def step_duration(step: object) -> float:
     actions = getattr(step, "actions", []) or []
-    duration = sum(action_duration(action) for action in actions)
+    duration = sum(max((action_duration(action) for action in group), default=0.0) for group in action_groups(actions))
     wait_after = getattr(step, "wait_after", None)
     if wait_after is not None:
         duration += float(wait_after)
     return duration
+
+
+def action_groups(actions: List[Any]) -> List[List[Any]]:
+    groups: List[List[Any]] = []
+    index = 0
+    mergeable = {"write", "fade_in", "fade_out", "show_creation"}
+    while index < len(actions):
+        first = actions[index]
+        group = [first]
+        if (
+            getattr(first, "type", None) in mergeable
+            and getattr(first, "target", None)
+            and not isinstance(getattr(first, "target", None), list)
+        ):
+            for candidate in actions[index + 1 :]:
+                if (
+                    getattr(candidate, "type", None) == getattr(first, "type", None)
+                    and getattr(candidate, "run_time", None) == getattr(first, "run_time", None)
+                    and getattr(candidate, "rate_func", None) == getattr(first, "rate_func", None)
+                    and getattr(candidate, "target", None)
+                    and not isinstance(getattr(candidate, "target", None), list)
+                ):
+                    group.append(candidate)
+                else:
+                    break
+        groups.append(group)
+        index += len(group)
+    return groups

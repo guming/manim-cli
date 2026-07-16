@@ -15,6 +15,17 @@ from manim_cli.qa.engine import run_qa
 @click.option("--storyboard", "storyboard_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
 @click.option("--out", "out_dir", type=click.Path(path_type=Path), default=None)
 @click.option("--repair-context", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
-def qa_cmd(scene_json: Path, profile: str, plan_path: Path | None, storyboard_path: Path | None, out_dir: Path | None, repair_context: Path | None) -> None:
+@click.option("--pacing", "pacing_profile", type=click.Choice(["preserve", "teaching", "accelerated"]), default="teaching", show_default=True)
+def qa_cmd(scene_json: Path, profile: str, plan_path: Path | None, storyboard_path: Path | None, out_dir: Path | None, repair_context: Path | None, pacing_profile: str) -> None:
     context = load_json(repair_context) if repair_context else None
-    print_json(run_qa(scene_json, profile=profile, plan_path=plan_path, storyboard_path=storyboard_path, out_dir=out_dir, repair_context=context))
+    print_json(
+        run_qa(
+            scene_json,
+            profile=profile,
+            plan_path=plan_path,
+            storyboard_path=storyboard_path,
+            out_dir=out_dir,
+            repair_context=context,
+            pacing_profile=pacing_profile,
+        )
+    )

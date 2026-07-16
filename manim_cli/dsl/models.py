@@ -39,6 +39,7 @@ LayoutRoleName = Literal[
     "proof.step",
     "chart.primary",
 ]
+TimingRoleName = Literal["transition", "derivation", "conclusion"]
 
 
 class SceneConfig(StrictBaseModel):
@@ -147,6 +148,7 @@ class ActionDef(StrictBaseModel):
     reason: Optional[str] = None
     slot: Optional[Literal["title", "subtitle", "main", "left_panel", "right_panel", "bottom_formula", "caption", "callout", "custom"]] = None
     region: Optional[Dict[str, Number]] = None
+    timing_role: Optional[TimingRoleName] = None
 
 
 class StepDef(StrictBaseModel):
@@ -157,6 +159,7 @@ class StepDef(StrictBaseModel):
     actions: List[ActionDef]
     wait_after: Optional[float] = None
     comment: Optional[str] = None
+    timing_role: Optional[TimingRoleName] = None
 
 
 class SceneDef(StrictBaseModel):

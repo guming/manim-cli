@@ -1,22 +1,40 @@
 import json
 import math
 from pathlib import Path
+import shutil
 
 from click.testing import CliRunner
+import pytest
 
 from manim_cli.cli import main
 from manim_cli.dsl.analysis import analyze_scene
 from manim_cli.dsl.compiler import compile_scene_file
+from manim_cli.dsl.fingerprints import layout_cache_identity, layout_fingerprint, memory_revision, source_fingerprint
+from manim_cli.dsl.knowledge import (
+    MemoryDocumentError,
+    build_repair_memory_context,
+    estimate_prompt_tokens,
+    load_local_documents,
+    load_scoped_documents,
+    policy_warnings,
+    rebuild_memory_index,
+    retrieve_typed_top_k,
+)
 from manim_cli.dsl.layout import BBox, estimate_bbox, layout_warnings, overlaps, slot_region
 from manim_cli.dsl.models import RESERVED_FUTURE_MOBJECT_FIELDS, RESERVED_FUTURE_SCENE_FIELDS, SCENE_SCHEMA_VERSION, SUPPORTED_SCENE_VERSIONS
 from manim_cli.dsl.names import safe_var_name
+from manim_cli.dsl.performance import benchmark_layout_memory, percentile
+from manim_cli.dsl.pacing import apply_pacing, build_step_duration_targets, pacing_warnings
 from manim_cli.dsl.timeline import build_timeline
-from manim_cli.dsl.validators import parse_scene_file, validate_scene_data, validate_scene_file
+from manim_cli.dsl.validators import parse_scene_data, parse_scene_file, validate_scene_data, validate_scene_file
 from manim_cli.jsonio import load_json
 from manim_cli.qa.eval import run_qa_eval
 from manim_cli.qa.engine import run_qa
+from manim_cli.planning.models import Storyboard, TeachingPlan
 from manim_cli.regression.manifest import run_regression_dir
 from manim_cli.render.diagnose import map_line
+from manim_cli.render.pacing_qa import run_render_pacing_qa
+from manim_cli.render.smoke import measured_formula_caption_findings, render_toolchain_status, run_measured_layout_render_smoke
 from manim_cli.render.visual_qa import analyze_keyframe, analyze_pixels
 from manim_cli.source_map import lookup_source_map
 
@@ -396,6 +414,455 @@ def test_local_policy_warning_and_knowledge_retrieval(tmp_path):
     assert any(match["document"].get("id") == "derivative_geometry" for match in payload["matches"])
 
 
+def test_yaml_memory_matches_json_behavior(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 48},
+            "layout_role": "formula.primary",
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    write_json_text(tmp_path / "scene.json", data)
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "knowledge" / "derivative_geometry.yaml").write_text(
+        """id: derivative_geometry
+description: Derivative geometry scenes.
+match:
+  formula_features: [limit_difference_quotient]
+  mobject_types: [Tex]
+required_roles: [formula.primary]
+prompt_summary: Prefer separated formula layout for derivative limits.
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "policies" / "tall_formula.yml").write_text(
+        r"""policy_id: tall_formula_bottom_region_safety
+type: diagnostic
+when:
+  layout_template: plot_with_bottom_formula
+  role: formula.primary
+  formula_contains_any: ['\lim', '\frac']
+prompt_summary: Tall formula in bottom region needs extra care.
+""",
+        encoding="utf-8",
+    )
+
+    validation = validate_scene_file(tmp_path / "scene.json", quality_gate="relaxed")
+    assert any(warning.get("policy_id") == "tall_formula_bottom_region_safety" for warning in validation["warnings"])
+    result = CliRunner().invoke(main, ["knowledge", "retrieve", str(tmp_path / "scene.json"), "--base-dir", str(tmp_path), "--top-k", "2"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert any(match["document"].get("id") == "derivative_geometry" for match in payload["matches"])
+
+
+def test_duplicate_memory_id_across_json_and_yaml_is_rejected(tmp_path):
+    (tmp_path / "knowledge").mkdir()
+    write_json_text(tmp_path / "knowledge" / "duplicate.json", {"id": "duplicate", "prompt_summary": "JSON"})
+    (tmp_path / "knowledge" / "duplicate.yaml").write_text("id: duplicate\nprompt_summary: YAML\n", encoding="utf-8")
+
+    try:
+        load_local_documents(tmp_path)
+    except MemoryDocumentError as exc:
+        assert "duplicate knowledge id 'duplicate'" in str(exc)
+    else:
+        raise AssertionError("duplicate memory IDs must fail")
+
+
+def test_invalid_yaml_memory_root_is_rejected(tmp_path):
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "knowledge" / "invalid.yaml").write_text("- not\n- a mapping\n", encoding="utf-8")
+
+    try:
+        load_local_documents(tmp_path)
+    except MemoryDocumentError as exc:
+        assert "root must be an object/mapping" in str(exc)
+    else:
+        raise AssertionError("invalid YAML memory must fail")
+
+
+def test_memory_scope_precedence_replaces_whole_document(tmp_path):
+    built_in = tmp_path / "built_in"
+    user = tmp_path / "user"
+    project = tmp_path / "project"
+    for root in (built_in, user, project):
+        (root / "policies").mkdir(parents=True)
+    write_json_text(
+        built_in / "policies" / "shared.json",
+        {"policy_id": "shared", "status": "active", "type": "diagnostic", "priority": 1, "when": {}, "message": "built in"},
+    )
+    write_json_text(
+        user / "policies" / "shared.json",
+        {"policy_id": "shared", "status": "active", "type": "diagnostic", "priority": 2, "when": {}, "message": "user"},
+    )
+    write_json_text(
+        project / "policies" / "shared.json",
+        {"policy_id": "shared", "status": "disabled", "type": "block", "priority": 3, "when": {}, "message": "project"},
+    )
+
+    documents = load_scoped_documents([("built_in", built_in), ("user", user), ("project", project)])
+    policy = next(doc for doc in documents if doc["document_type"] == "policy")
+    assert policy["_scope"] == "project"
+    assert policy["status"] == "disabled"
+    assert policy["type"] == "block"
+    assert "built in" not in json.dumps(policy)
+
+
+def test_memory_index_is_atomic_and_detects_stale_sources(tmp_path):
+    (tmp_path / "knowledge").mkdir()
+    knowledge_path = tmp_path / "knowledge" / "derivative.json"
+    write_json_text(
+        knowledge_path,
+        {"id": "derivative", "match": {"formula_features": ["limit_difference_quotient"]}, "prompt_summary": "Derivative risk."},
+    )
+
+    index_path = rebuild_memory_index(tmp_path)
+    assert index_path == tmp_path / "index.json"
+    assert not list(tmp_path.glob("*.tmp"))
+    documents = load_local_documents(tmp_path)
+    assert documents[0]["_index_mode"] == "index"
+
+    write_json_text(
+        knowledge_path,
+        {"id": "derivative", "match": {"formula_features": ["fraction"]}, "prompt_summary": "Changed."},
+    )
+    try:
+        load_local_documents(tmp_path)
+    except MemoryDocumentError as exc:
+        assert "stale memory index entry" in str(exc)
+    else:
+        raise AssertionError("stale index must fail instead of silently loading changed memory")
+
+
+def test_typed_retrieval_separates_knowledge_and_reviewed_failures(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 48},
+            "layout_role": "formula.primary",
+        }
+    ]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "failures" / "reviewed").mkdir(parents=True)
+    write_json_text(
+        tmp_path / "knowledge" / "derivative.json",
+        {
+            "id": "derivative_geometry",
+            "priority": 80,
+            "match": {"formula_features": ["limit_difference_quotient"], "mobject_types": ["Tex"]},
+            "required_roles": ["formula.primary"],
+            "prompt_summary": "Keep derivative formulas separate from captions.",
+        },
+    )
+    write_json_text(
+        tmp_path / "failures" / "reviewed" / "overlap.json",
+        {
+            "failure_id": "derivative_overlap",
+            "scene_type": "derivative_geometry",
+            "trigger": {
+                "layout_template": "plot_with_bottom_formula",
+                "visible_roles": ["formula.primary"],
+                "formula_features": ["limit_difference_quotient"],
+            },
+            "evidence": {"issue_types": ["layout_formula_caption_overlap"]},
+            "severity": "blocking",
+            "confidence": "high",
+            "prompt_summary": "A tall derivative formula previously overlapped its caption.",
+        },
+    )
+    rebuild_memory_index(tmp_path)
+
+    retrieval = retrieve_typed_top_k(
+        parse_scene_file(scene_path),
+        tmp_path,
+        issue_types=["layout_formula_caption_overlap"],
+    )
+    assert [item["id"] for item in retrieval["knowledge"]] == ["derivative_geometry"]
+    assert [item["failure_id"] for item in retrieval["reviewed_failures"]] == ["derivative_overlap"]
+    failure = retrieval["reviewed_failures"][0]
+    assert "issue:layout_formula_caption_overlap" in failure["matched_features"]
+    assert failure["index_mode"] == "index"
+    assert failure["source_scope"] == "project"
+
+    cli = CliRunner().invoke(
+        main,
+        [
+            "knowledge",
+            "retrieve",
+            str(scene_path),
+            "--base-dir",
+            str(tmp_path),
+            "--issue-type",
+            "layout_formula_caption_overlap",
+        ],
+    )
+    assert cli.exit_code == 0, cli.output
+    payload = json.loads(cli.output)
+    assert payload["retrieval"]["knowledge"][0]["id"] == "derivative_geometry"
+    assert payload["retrieval"]["reviewed_failures"][0]["failure_id"] == "derivative_overlap"
+
+
+def test_qa_feedback_includes_budgeted_repair_memory_context(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["version"] = "1.1"
+    data["layout_template"] = "plot_with_bottom_formula"
+    data["mobjects"] = [
+        {
+            "id": "formula",
+            "type": "Tex",
+            "args": {"tex": r"f'(a)=\lim_{h\to0}\frac{f(a+h)-f(a)}{h}", "font_size": 48},
+            "layout_role": "formula.primary",
+            "position": {"mode": "absolute", "point": [0, 0, 0]},
+        },
+        {
+            "id": "caption",
+            "type": "Text",
+            "args": {"text": "Derivative conclusion", "font_size": 32},
+            "layout_role": "caption.conclusion",
+            "position": {"mode": "absolute", "point": [0, 0, 0]},
+        },
+    ]
+    data["steps"] = [
+        {"id": "s1", "name": "show", "actions": [{"type": "write", "target": "formula"}, {"type": "write", "target": "caption"}]}
+    ]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "failures" / "reviewed").mkdir(parents=True)
+    write_json_text(
+        tmp_path / "knowledge" / "derivative.json",
+        {
+            "id": "derivative_geometry",
+            "priority": 80,
+            "match": {"formula_features": ["limit_difference_quotient"], "mobject_types": ["Tex"]},
+            "required_roles": ["formula.primary"],
+            "prompt_summary": "Reserve separate regions for the derivative formula and conclusion caption.",
+            "private_notes": "MUST_NOT_APPEAR",
+        },
+    )
+    write_json_text(
+        tmp_path / "failures" / "reviewed" / "overlap.json",
+        {
+            "failure_id": "derivative_overlap",
+            "scene_type": "derivative_geometry",
+            "trigger": {
+                "layout_template": "plot_with_bottom_formula",
+                "visible_roles": ["formula.primary", "caption.conclusion"],
+                "formula_features": ["limit_difference_quotient"],
+            },
+            "evidence": {"issue_types": ["layout_overlap"]},
+            "root_cause": ["MUST_NOT_APPEAR"],
+            "severity": "blocking",
+            "confidence": "high",
+            "prompt_summary": "A tall derivative formula previously collided with its caption.",
+        },
+    )
+    rebuild_memory_index(tmp_path)
+
+    report = run_qa(scene_path, profile="strict", out_dir=tmp_path / "feedback")
+    context = report["repair_memory_context"]
+    assert context["selected_ids"] == ["derivative_geometry", "derivative_overlap"]
+    assert context["estimated_prompt_tokens"] <= context["max_prompt_tokens"] == 500
+    assert context["token_estimator"] == "ceil(unicode_codepoints/4)"
+    prompt = (tmp_path / "feedback" / "agent_prompt.md").read_text(encoding="utf-8")
+    assert "## Known layout risks" in prompt
+    assert "derivative_geometry" in prompt
+    assert "derivative_overlap" in prompt
+    assert "MUST_NOT_APPEAR" not in prompt
+    memory_section = prompt[prompt.index("## Known layout risks") :]
+    assert estimate_prompt_tokens(memory_section) == context["estimated_prompt_tokens"]
+
+
+def test_repair_memory_context_enforces_budget_and_deduplicates(tmp_path):
+    scene = parse_scene_file(FIXTURES / "simple_transform.json")
+    (tmp_path / "knowledge").mkdir()
+    long_summary = "layout risk " * 100
+    for index in range(2):
+        write_json_text(
+            tmp_path / "knowledge" / f"item_{index}.json",
+            {
+                "id": f"item_{index}",
+                "priority": 200 - index,
+                "match": {"mobject_types": ["Circle", "Square"]},
+                "prompt_summary": long_summary if index == 0 else "distinct " + long_summary,
+            },
+        )
+    rebuild_memory_index(tmp_path)
+
+    context = build_repair_memory_context(scene, tmp_path, max_prompt_tokens=500)
+    assert context["estimated_prompt_tokens"] <= 500
+    assert len(context["selected_ids"]) == 1
+    assert len(context["skipped_budget_ids"]) == 1
+
+    write_json_text(
+        tmp_path / "knowledge" / "item_1.json",
+        {
+            "id": "item_1",
+            "priority": 199,
+            "match": {"mobject_types": ["Circle", "Square"]},
+            "prompt_summary": long_summary,
+        },
+    )
+    rebuild_memory_index(tmp_path)
+    deduplicated = build_repair_memory_context(scene, tmp_path, max_prompt_tokens=500)
+    assert deduplicated["selected_ids"] == ["item_0"]
+    assert deduplicated["skipped_budget_ids"] == []
+
+
+def test_layout_memory_performance_gate_on_typical_corpus(tmp_path):
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, load_json(FIXTURES / "simple_transform.json"))
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "failures" / "reviewed").mkdir(parents=True)
+    for index in range(10):
+        write_json_text(
+            tmp_path / "knowledge" / f"knowledge_{index:02d}.json",
+            {
+                "id": f"knowledge_{index:02d}",
+                "priority": 100 - index,
+                "match": {"mobject_types": ["Circle", "Square"]},
+                "prompt_summary": f"Knowledge summary {index}.",
+            },
+        )
+        write_json_text(
+            tmp_path / "failures" / "reviewed" / f"failure_{index:02d}.json",
+            {
+                "failure_id": f"failure_{index:02d}",
+                "scene_type": "unknown",
+                "trigger": {},
+                "evidence": {"issue_types": []},
+                "severity": "blocking",
+                "confidence": "high",
+                "prompt_summary": f"Failure summary {index}.",
+            },
+        )
+    for index in range(20):
+        write_json_text(
+            tmp_path / "policies" / f"policy_{index:02d}.json",
+            {
+                "policy_id": f"policy_{index:02d}",
+                "status": "active",
+                "type": "diagnostic",
+                "priority": index,
+                "when": {},
+                "message": f"Policy {index}.",
+            },
+        )
+    rebuild_memory_index(tmp_path)
+
+    benchmark = benchmark_layout_memory(parse_scene_file(scene_path), tmp_path, iterations=20)
+    assert benchmark["hard_gate_passed"], benchmark
+    assert benchmark["target_met"], benchmark
+    assert benchmark["hard_limit_p95_ms"] == 250.0
+    assert set(benchmark["operations"]) == {
+        "feature_extraction",
+        "policy_matching",
+        "typed_retrieval",
+        "repair_context",
+        "layout_fingerprint",
+        "memory_revision",
+    }
+    assert all(result["p95_ms"] >= 0 for result in benchmark["operations"].values())
+
+    cli = CliRunner().invoke(
+        main,
+        [
+            "knowledge",
+            "benchmark",
+            str(scene_path),
+            "--base-dir",
+            str(tmp_path),
+            "--iterations",
+            "5",
+        ],
+    )
+    assert cli.exit_code == 0, cli.output
+    payload = json.loads(cli.output)
+    assert payload["ok"] == payload["hard_gate_passed"]
+    assert payload["target_p95_ms"] == 50.0
+
+
+def test_performance_percentile_uses_nearest_rank():
+    assert percentile([1.0, 2.0, 3.0, 4.0], 0.50) == 2.0
+    assert percentile([1.0, 2.0, 3.0, 4.0], 0.95) == 4.0
+
+
+def test_policy_conflict_blocks_strict_and_skips_conflicting_effects(tmp_path):
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, load_json(FIXTURES / "simple_transform.json"))
+    scene = parse_scene_file(scene_path)
+    (tmp_path / "policies").mkdir()
+    common = {"status": "active", "type": "enforce", "priority": 100, "when": {}}
+    write_json_text(tmp_path / "policies" / "a.json", {**common, "policy_id": "enforce_a", "enforce": {"min_gap": 0.3}})
+    write_json_text(tmp_path / "policies" / "b.json", {**common, "policy_id": "enforce_b", "enforce": {"min_gap": 0.5}})
+
+    relaxed = policy_warnings(scene, tmp_path, profile="relaxed")
+    conflict = next(warning for warning in relaxed if warning["type"] == "layout_policy_conflict")
+    assert conflict["policy_ids"] == ["enforce_a", "enforce_b"]
+    assert not any(warning.get("policy_id") in conflict["policy_ids"] for warning in relaxed)
+    strict = policy_warnings(scene, tmp_path, profile="strict")
+    assert any(warning["type"] == "layout_policy_conflict" for warning in strict)
+    qa = run_qa(scene_path, profile="strict")
+    assert not qa["ok"]
+    assert any(issue["type"] == "layout_policy_conflict" and issue["severity"] == "error" for issue in qa["issues"])
+    compiled = compile_scene_file(scene_path, tmp_path / "compiled", profile="strict", use_cache=False)
+    assert not compiled["ok"]
+    assert compiled["error_type"] == "layout_policy_conflict"
+
+
+def test_allow_cannot_suppress_block_policy(tmp_path):
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, load_json(FIXTURES / "simple_transform.json"))
+    scene = parse_scene_file(scene_path)
+    (tmp_path / "policies").mkdir()
+    write_json_text(
+        tmp_path / "policies" / "block.json",
+        {"policy_id": "hard_block", "status": "active", "type": "block", "priority": 1, "when": {}, "message": "blocked"},
+    )
+    write_json_text(
+        tmp_path / "policies" / "allow.json",
+        {"policy_id": "try_allow", "status": "active", "type": "allow", "priority": 100, "when": {}, "allows": ["hard_block"]},
+    )
+
+    warnings = policy_warnings(scene, tmp_path)
+    assert any(warning.get("policy_id") == "hard_block" for warning in warnings)
+    qa = run_qa(scene_path, profile="strict")
+    block_issue = next(issue for issue in qa["issues"] if issue.get("details", {}).get("policy_id") == "hard_block")
+    assert block_issue["severity"] == "error"
+    compiled = compile_scene_file(scene_path, tmp_path / "compiled", profile="strict", use_cache=False)
+    assert not compiled["ok"]
+    assert compiled["error_type"] == "layout_memory_policy_applied"
+
+
+def test_policy_limit_does_not_partially_evaluate_in_strict(tmp_path):
+    scene = parse_scene_file(FIXTURES / "simple_transform.json")
+    (tmp_path / "policies").mkdir()
+    for index in range(21):
+        write_json_text(
+            tmp_path / "policies" / f"policy_{index:02d}.json",
+            {"policy_id": f"policy_{index:02d}", "status": "active", "type": "diagnostic", "priority": index, "when": {}},
+        )
+
+    strict = policy_warnings(scene, tmp_path, profile="strict")
+    assert [warning["type"] for warning in strict] == ["layout_policy_budget_exceeded"]
+    relaxed = policy_warnings(scene, tmp_path, profile="relaxed")
+    assert relaxed[0]["type"] == "layout_policy_budget_exceeded"
+    assert len([warning for warning in relaxed if warning["type"] == "layout_memory_policy_applied"]) == 20
+
+
 def test_knowledge_record_failure_writes_inbox_without_retrieval(tmp_path):
     data = load_json(FIXTURES / "simple_transform.json")
     data["mobjects"] = [
@@ -459,6 +926,7 @@ def test_knowledge_promote_reviewed_failure_to_policy(tmp_path):
     assert policy["policy_id"] == "policy_derivative_formula_caption_overlap_2026_07"
     assert policy["source_failure_id"] == failure["failure_id"]
     assert policy["when"]["formula_features_any"] == ["limit_difference_quotient"]
+    assert policy["status"] == "candidate"
 
     scene = load_json(FIXTURES / "simple_transform.json")
     scene["version"] = "1.1"
@@ -480,7 +948,186 @@ def test_knowledge_promote_reviewed_failure_to_policy(tmp_path):
     scene["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}, {"type": "write", "target": "caption"}]}]
     write_json_text(tmp_path / "scene.json", scene)
     qa = run_qa(tmp_path / "scene.json", profile="relaxed")
+    assert not any(issue["type"] == "layout_memory_policy_applied" and issue["details"]["policy_id"] == policy["policy_id"] for issue in qa["issues"])
+
+    policy["status"] = "active"
+    write_json_text(policy_path, policy)
+    qa = run_qa(tmp_path / "scene.json", profile="relaxed")
     assert any(issue["type"] == "layout_memory_policy_applied" and issue["details"]["policy_id"] == policy["policy_id"] for issue in qa["issues"])
+
+    compiled = compile_scene_file(tmp_path / "scene.json", tmp_path / "compiled", use_cache=True)
+    applied = next(change for change in compiled["layout_changes"] if change["change"] == "layout_memory_policy_applied")
+    assert applied["policy_id"] == policy["policy_id"]
+    assert applied["policy_status"] == "active"
+    assert applied["source_scope"] == "project"
+    cached = compile_scene_file(tmp_path / "scene.json", tmp_path / "compiled", use_cache=True)
+    assert cached["cached"]
+    assert cached["layout_changes"] == compiled["layout_changes"]
+
+
+def test_knowledge_promote_reviewed_yaml_to_yaml_policy(tmp_path):
+    reviewed_dir = tmp_path / "failures" / "reviewed"
+    reviewed_dir.mkdir(parents=True)
+    reviewed_path = reviewed_dir / "failure.yaml"
+    reviewed_path.write_text(
+        """failure_id: derivative_yaml_failure
+scene_type: derivative_geometry
+symptom: formula overlaps caption
+trigger:
+  layout_template: plot_with_bottom_formula
+  formula_features: [limit_difference_quotient]
+evidence:
+  issue_types: [layout_overlap]
+severity: blocking
+confidence: high
+prompt_summary: Keep the derivative formula away from the caption.
+""",
+        encoding="utf-8",
+    )
+
+    promoted = CliRunner().invoke(
+        main,
+        ["knowledge", "promote-policy", str(reviewed_path), "--base-dir", str(tmp_path), "--format", "yaml"],
+    )
+    assert promoted.exit_code == 0, promoted.output
+    payload = json.loads(promoted.output)
+    policy_path = Path(payload["policy"])
+    assert policy_path.suffix == ".yaml"
+    policies = [doc for doc in load_local_documents(tmp_path) if doc["document_type"] == "policy"]
+    assert policies[0]["policy_id"] == "policy_derivative_yaml_failure"
+    assert policies[0]["status"] == "candidate"
+    assert policies[0]["when"]["formula_features_any"] == ["limit_difference_quotient"]
+
+
+def test_knowledge_record_failure_can_write_yaml_atomically(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    data["mobjects"] = [
+        {"id": "a", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
+        {"id": "b", "type": "Circle", "args": {"radius": 1.0}, "position": {"mode": "absolute", "point": [0, 0, 0]}},
+    ]
+    data["steps"] = [{"id": "s1", "name": "show both", "actions": [{"type": "add", "target": "a"}, {"type": "add", "target": "b"}]}]
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+
+    result = CliRunner().invoke(
+        main,
+        ["knowledge", "record-failure", str(scene_path), "--base-dir", str(tmp_path), "--format", "yaml"],
+    )
+    assert result.exit_code == 0, result.output
+    failure_path = Path(json.loads(result.output)["failure_memory"])
+    assert failure_path.suffix == ".yaml"
+    assert not list(failure_path.parent.glob("*.tmp"))
+
+
+def test_memory_management_cli_lifecycle(tmp_path):
+    inbox = tmp_path / "failures" / "inbox"
+    inbox.mkdir(parents=True)
+    failure = {
+        "failure_id": "managed_failure",
+        "scene_type": "unknown",
+        "symptom": "managed overlap",
+        "trigger": {"mobject_types": ["Circle", "Square"]},
+        "evidence": {"issue_types": ["layout_overlap"]},
+        "severity": "blocking",
+        "confidence": "high",
+        "prompt_summary": "Avoid repeating the managed overlap.",
+    }
+    write_json_text(inbox / "managed_failure.json", failure)
+
+    listed = CliRunner().invoke(
+        main,
+        ["memory", "list", "--scope", "project", "--base-dir", str(tmp_path), "--kind", "failures"],
+    )
+    assert listed.exit_code == 0, listed.output
+    listed_payload = json.loads(listed.output)
+    assert listed_payload["items"][0]["id"] == "managed_failure"
+    assert listed_payload["items"][0]["state"] == "inbox"
+
+    inspected = CliRunner().invoke(
+        main,
+        ["memory", "inspect", "managed_failure", "--scope", "project", "--base-dir", str(tmp_path)],
+    )
+    assert inspected.exit_code == 0, inspected.output
+    assert json.loads(inspected.output)["document"]["symptom"] == "managed overlap"
+
+    reviewed = CliRunner().invoke(
+        main,
+        ["memory", "review", "managed_failure", "--scope", "project", "--base-dir", str(tmp_path)],
+    )
+    assert reviewed.exit_code == 0, reviewed.output
+    reviewed_path = Path(json.loads(reviewed.output)["reviewed_failure"])
+    assert reviewed_path.exists()
+    assert not (inbox / "managed_failure.json").exists()
+    assert (tmp_path / "index.json").exists()
+
+    promoted = CliRunner().invoke(
+        main,
+        ["memory", "promote", str(reviewed_path), "--scope", "project", "--base-dir", str(tmp_path)],
+    )
+    assert promoted.exit_code == 0, promoted.output
+    policy_path = Path(json.loads(promoted.output)["policy"])
+    policy = load_json(policy_path)
+    assert policy["status"] == "candidate"
+
+    activated = CliRunner().invoke(
+        main,
+        ["memory", "activate", policy["policy_id"], "--scope", "project", "--base-dir", str(tmp_path)],
+    )
+    assert activated.exit_code == 0, activated.output
+    assert load_json(policy_path)["status"] == "active"
+    assert load_json(tmp_path / "index.json")["items"]
+
+    disabled = CliRunner().invoke(
+        main,
+        ["memory", "disable", policy["policy_id"], "--scope", "project", "--base-dir", str(tmp_path)],
+    )
+    assert disabled.exit_code == 0, disabled.output
+    assert load_json(policy_path)["status"] == "disabled"
+
+    rebuilt = CliRunner().invoke(
+        main,
+        ["memory", "rebuild-index", "--scope", "project", "--base-dir", str(tmp_path)],
+    )
+    assert rebuilt.exit_code == 0, rebuilt.output
+    assert Path(json.loads(rebuilt.output)["index"]).exists()
+
+
+def test_memory_clean_is_dry_run_by_default_and_requires_apply(tmp_path):
+    inbox = tmp_path / "failures" / "inbox"
+    inbox.mkdir(parents=True)
+    failure_path = inbox / "old.json"
+    write_json_text(failure_path, {"failure_id": "old", "prompt_summary": "old failure"})
+
+    dry_run = CliRunner().invoke(
+        main,
+        ["memory", "clean", "--scope", "project", "--base-dir", str(tmp_path), "--inbox", "--older-than", "0"],
+    )
+    assert dry_run.exit_code == 0, dry_run.output
+    dry_payload = json.loads(dry_run.output)
+    assert dry_payload["dry_run"] is True
+    assert dry_payload["deleted_count"] == 0
+    assert failure_path.exists()
+
+    applied = CliRunner().invoke(
+        main,
+        [
+            "memory",
+            "clean",
+            "--scope",
+            "project",
+            "--base-dir",
+            str(tmp_path),
+            "--inbox",
+            "--older-than",
+            "0",
+            "--apply",
+        ],
+    )
+    assert applied.exit_code == 0, applied.output
+    applied_payload = json.loads(applied.output)
+    assert applied_payload["dry_run"] is False
+    assert applied_payload["deleted_count"] == 1
+    assert not failure_path.exists()
 
 
 def test_compile_explicit_layout_overrides_v11_role(tmp_path):
@@ -556,6 +1203,105 @@ def test_compile_cache_hit(tmp_path):
     cache = load_json(out / ".compile-cache.json")
     assert cache["manim_cli_version"]
     assert "manim_version" in cache
+
+
+def test_compile_cache_uses_canonical_scene_fingerprint(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    scene_path = tmp_path / "scene.json"
+    scene_path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
+    out = tmp_path / "canonical-cache"
+    first = compile_scene_file(scene_path, out, use_cache=True)
+    assert first["ok"] and not first["cached"]
+
+    scene_path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    second = compile_scene_file(scene_path, out, use_cache=True)
+    assert second["ok"] and second["cached"]
+    assert second["cache_identity"]["source_fingerprint"] == first["cache_identity"]["source_fingerprint"]
+
+
+def test_layout_analysis_cache_ignores_comments_but_invalidates_formula(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    out = tmp_path / "analysis-cache"
+    first = compile_scene_file(scene_path, out, use_cache=True)
+    assert first["ok"] and not first["analysis_cached"]
+
+    data["description"] = "A source-only description change."
+    data["steps"][0]["comment"] = "A source-only comment change."
+    write_json_text(scene_path, data)
+    second = compile_scene_file(scene_path, out, use_cache=True)
+    assert second["ok"] and not second["cached"]
+    assert second["analysis_cached"]
+    assert second["cache_identity"]["source_fingerprint"] != first["cache_identity"]["source_fingerprint"]
+    assert second["cache_identity"]["layout_fingerprint"] == first["cache_identity"]["layout_fingerprint"]
+
+    data["mobjects"] = [{"id": "formula", "type": "Tex", "args": {"tex": r"\frac{x}{y}", "font_size": 48}}]
+    data["steps"] = [{"id": "s1", "name": "formula", "actions": [{"type": "write", "target": "formula"}]}]
+    write_json_text(scene_path, data)
+    third = compile_scene_file(scene_path, out, use_cache=True)
+    assert third["ok"] and not third["analysis_cached"]
+    assert third["cache_identity"]["layout_fingerprint"] != second["cache_identity"]["layout_fingerprint"]
+
+
+def test_layout_analysis_cache_invalidates_on_active_memory_change(tmp_path):
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, load_json(FIXTURES / "simple_transform.json"))
+    (tmp_path / "policies").mkdir()
+    policy_path = tmp_path / "policies" / "diagnostic.json"
+    policy = {"policy_id": "cache_policy", "status": "active", "type": "diagnostic", "priority": 1, "when": {}, "message": "v1"}
+    write_json_text(policy_path, policy)
+    rebuild_memory_index(tmp_path)
+    out = tmp_path / "memory-cache"
+    first = compile_scene_file(scene_path, out, use_cache=True)
+    assert first["ok"] and not first["analysis_cached"]
+
+    policy["message"] = "v2"
+    write_json_text(policy_path, policy)
+    rebuild_memory_index(tmp_path)
+    second = compile_scene_file(scene_path, out, use_cache=True)
+    assert second["ok"] and not second["cached"] and not second["analysis_cached"]
+    assert second["cache_identity"]["memory_revision"] != first["cache_identity"]["memory_revision"]
+
+
+def test_corrupt_layout_analysis_cache_falls_back_safely(tmp_path):
+    data = load_json(FIXTURES / "simple_transform.json")
+    scene_path = tmp_path / "scene.json"
+    write_json_text(scene_path, data)
+    out = tmp_path / "corrupt-analysis"
+    first = compile_scene_file(scene_path, out, use_cache=True)
+    assert first["ok"]
+    (out / ".layout-analysis-cache.json").write_text("{not json", encoding="utf-8")
+    data["description"] = "force compile-output miss without layout change"
+    write_json_text(scene_path, data)
+
+    second = compile_scene_file(scene_path, out, use_cache=True)
+    assert second["ok"] and not second["analysis_cached"]
+    assert any(warning["type"] == "layout_analysis_cache_corrupt" for warning in second["warnings"])
+
+
+def test_no_cache_bypasses_compile_and_layout_cache_writes(tmp_path):
+    out = tmp_path / "no-cache"
+    result = compile_scene_file(FIXTURES / "simple_transform.json", out, use_cache=False)
+    assert result["ok"] and not result["cached"]
+    assert not (out / ".compile-cache.json").exists()
+    assert not (out / ".layout-analysis-cache.json").exists()
+
+
+def test_fingerprint_contract_separates_source_layout_memory_and_environment(tmp_path, monkeypatch):
+    scene = parse_scene_file(FIXTURES / "simple_transform.json")
+    source = source_fingerprint(scene)
+    layout = layout_fingerprint(scene)
+    assert source and layout and source != layout
+    assert memory_revision(tmp_path)
+
+    import manim_cli.dsl.fingerprints as fingerprints
+
+    monkeypatch.setattr(fingerprints, "bbox_environment_version", lambda: "env-a")
+    first = layout_cache_identity(scene, tmp_path)
+    monkeypatch.setattr(fingerprints, "bbox_environment_version", lambda: "env-b")
+    second = layout_cache_identity(scene, tmp_path)
+    assert first["bbox_environment_version"] != second["bbox_environment_version"]
 
 
 def test_compile_source_map_contains_metadata(tmp_path):
@@ -682,6 +1428,8 @@ def test_qa_timing_drift_and_feedback(tmp_path):
     prompt = (tmp_path / "feedback" / "agent_prompt.md").read_text(encoding="utf-8")
     assert "Scope:" in prompt
     assert "Repair:" in prompt
+    assert "## Known layout risks" not in prompt
+    assert result["repair_memory_context"]["selected"] == []
 
 
 def test_qa_cue_event_timing_drift(tmp_path):
@@ -1313,3 +2061,241 @@ def test_latex_bbox_probe_scene():
     else:
         assert results2["eq"].status == "unavailable"
     tmp_scene.unlink(missing_ok=True)
+
+
+def test_measured_formula_caption_smoke_has_safe_and_contradiction_paths():
+    from manim_cli.render.bbox_probe import BBoxProbeResult
+
+    safe_scene = parse_scene_file(Path(__file__).parent / "render_smoke" / "measured_safe.json")
+    safe_results = {
+        "formula": BBoxProbeResult(status="measured", bbox=BBox(-1.5, -0.4, 1.5, 0.4), method="latex_dvisvgm")
+    }
+    assert measured_formula_caption_findings(safe_scene, safe_results) == []
+
+    contradiction_scene = parse_scene_file(Path(__file__).parent / "render_smoke" / "measured_contradiction.json")
+    assert measured_formula_caption_findings(contradiction_scene, {}) == []
+    contradiction_results = {
+        "formula": BBoxProbeResult(status="measured", bbox=BBox(-2.0, -2.0, 2.0, 2.0), method="latex_dvisvgm")
+    }
+    findings = measured_formula_caption_findings(contradiction_scene, contradiction_results)
+    assert findings[0]["type"] == "layout_formula_caption_overlap"
+    assert findings[0]["measured_gap"] < 0.35
+    assert findings[0]["bbox_sources"]["formula"] == "latex_dvisvgm"
+
+
+def test_render_smoke_reports_explicit_toolchain_skip(tmp_path, monkeypatch):
+    import manim_cli.render.smoke as smoke
+
+    status = {
+        "ready": False,
+        "components": {"manim_executable": None, "manim_python": False, "latex_executable": None, "dvisvgm_executable": None},
+        "skip_reasons": ["test toolchain unavailable"],
+        "probe": None,
+    }
+    monkeypatch.setattr(smoke, "render_toolchain_status", lambda: status)
+    result = run_measured_layout_render_smoke(
+        Path(__file__).parent / "render_smoke" / "measured_safe.json",
+        tmp_path / "safe.mp4",
+        "measured_safe",
+    )
+    assert result["ok"]
+    assert result["render_skipped"] is True
+    assert result["skip_reason"] == "test toolchain unavailable"
+
+
+def test_render_toolchain_status_is_structured():
+    status = render_toolchain_status()
+    assert isinstance(status["ready"], bool)
+    assert set(status["components"]) == {"manim_executable", "manim_python", "latex_executable", "dvisvgm_executable"}
+    assert isinstance(status["skip_reasons"], list)
+    if not status["ready"]:
+        assert status["skip_reasons"]
+
+
+def test_visual_qa_render_smoke_cli_reports_skip(tmp_path, monkeypatch):
+    import manim_cli.render.smoke as smoke
+
+    monkeypatch.setattr(
+        smoke,
+        "render_toolchain_status",
+        lambda: {"ready": False, "components": {}, "skip_reasons": ["forced skip"], "probe": None},
+    )
+    result = CliRunner().invoke(
+        main,
+        [
+            "visual-qa",
+            "render-smoke",
+            str(Path(__file__).parent / "render_smoke" / "measured_safe.json"),
+            "--expect",
+            "measured_safe",
+            "--out",
+            str(tmp_path / "safe.mp4"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["render_skipped"] is True
+    assert payload["skip_reason"] == "forced skip"
+
+
+def test_real_measured_layout_render_smoke_when_toolchain_is_ready(tmp_path):
+    status = render_toolchain_status()
+    if not status["ready"]:
+        pytest.skip("; ".join(status["skip_reasons"]))
+    fixture_root = Path(__file__).parent / "render_smoke"
+    safe_scene = tmp_path / "measured_safe.json"
+    shutil.copy(fixture_root / "measured_safe.json", safe_scene)
+
+    safe = run_measured_layout_render_smoke(safe_scene, tmp_path / "measured-safe.mp4", "measured_safe")
+    assert safe["ok"], safe
+    assert safe["render_skipped"] is False
+    assert Path(safe["output"]).exists()
+
+
+def pacing_scene():
+    return parse_scene_data(
+        {
+            "version": "1.1",
+            "name": "pacing_test",
+            "layout_template": "formula_then_caption",
+            "config": {"resolution": [854, 480], "frame_height": 8, "background_color": "#1e1e1e", "fps": 15, "visual_theme": "test"},
+            "mobjects": [
+                {"id": "title", "type": "Text", "args": {"text": "Title", "font_size": 32}, "position": {"mode": "absolute", "point": [0, 2.8, 0]}},
+                {"id": "formula", "type": "Text", "args": {"text": "x² + 6x + 9 = 4", "font_size": 40}, "layout_role": "formula.primary", "position": {"mode": "absolute", "point": [0, 0.6, 0]}},
+                {"id": "answer", "type": "Text", "args": {"text": "x = -1 or x = -5", "font_size": 36}, "layout_role": "caption.conclusion", "position": {"mode": "absolute", "point": [0, -2.6, 0]}},
+            ],
+            "steps": [
+                {"id": "intro", "name": "intro", "timing_role": "transition", "actions": [{"type": "write", "target": "title", "run_time": 1.0}], "wait_after": 1.0},
+                {"id": "derive", "name": "derive", "actions": [{"type": "write", "target": "formula", "run_time": 0.2}], "wait_after": 0.1},
+                {"id": "finish", "name": "finish", "actions": [{"type": "fade_in", "target": "answer", "run_time": 0.2}], "wait_after": 0.1},
+            ],
+        }
+    )
+
+
+def test_pacing_preserve_keeps_source_timeline():
+    result = apply_pacing(pacing_scene(), "preserve")
+    assert result.source_duration == result.effective_duration
+    assert result.duration_scale == 1.0
+    assert result.timing_changes == []
+
+
+def test_teaching_pacing_only_extends_short_instructional_timing():
+    result = apply_pacing(pacing_scene(), "teaching")
+    assert result.effective_duration > result.source_duration
+    assert result.scene.steps[0].actions[0].run_time == 1.0
+    assert result.scene.steps[0].wait_after == 1.0
+    assert result.scene.steps[1].actions[0].run_time >= 0.7
+    assert result.scene.steps[1].wait_after >= 0.8
+    assert result.scene.steps[2].wait_after >= 2.0
+
+
+def test_accelerated_pacing_compresses_transition_but_protects_derivation_and_conclusion():
+    result = apply_pacing(pacing_scene(), "accelerated")
+    assert result.scene.steps[0].actions[0].run_time < 1.0
+    assert result.scene.steps[0].wait_after <= 0.2
+    assert result.scene.steps[1].actions[0].run_time >= 0.7
+    assert result.scene.steps[1].wait_after >= 0.8
+    assert result.scene.steps[2].wait_after >= 2.0
+
+
+def test_timeline_matches_parallel_codegen_for_mergeable_actions():
+    scene = pacing_scene()
+    scene.steps[0].actions.append(scene.steps[0].actions[0].model_copy(update={"target": "formula"}))
+    timeline = build_timeline(scene)
+    assert timeline[0].duration_seconds == 2.0
+
+
+def test_compile_cache_isolated_by_pacing_profile(tmp_path):
+    scene_path = tmp_path / "scene.json"
+    scene_path.write_text(json.dumps(pacing_scene().model_dump(by_alias=True), ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "generated"
+    preserve = compile_scene_file(scene_path, out, profile="preview", pacing_profile="preserve")
+    teaching = compile_scene_file(scene_path, out, profile="preview", pacing_profile="teaching")
+    assert preserve["ok"] and teaching["ok"]
+    assert preserve["cache_key"] != teaching["cache_key"]
+    assert teaching["cached"] is False
+    assert teaching["effective_duration"] > preserve["effective_duration"]
+
+
+def test_pacing_compression_warning_thresholds():
+    result = apply_pacing(pacing_scene(), "accelerated")
+    warnings = pacing_warnings(result)
+    if result.duration_scale < 0.8:
+        assert warnings
+        assert warnings[0]["blocking"] is (result.duration_scale < 0.6)
+
+
+def test_render_pacing_qa_compares_actual_duration_and_conclusion_hold(monkeypatch, tmp_path):
+    pacing = apply_pacing(pacing_scene(), "teaching")
+    monkeypatch.setattr(
+        "manim_cli.render.pacing_qa.probe_video",
+        lambda _: {"ok": True, "duration": pacing.effective_duration, "width": 854, "height": 480, "fps": 15},
+    )
+    result = run_render_pacing_qa(tmp_path / "video.mp4", pacing)
+    assert result["ok"], result
+    assert result["actual_video_duration"] == round(pacing.effective_duration, 3)
+
+
+def test_math_samples_have_teaching_pacing_regression_targets():
+    root = Path(__file__).parents[1] / "examples"
+    completing = apply_pacing(parse_scene_file(root / "completing_the_square" / "scene.json"), "teaching")
+    pythagorean = apply_pacing(parse_scene_file(root / "pythagorean_theorem" / "scene.json"), "teaching")
+    assert 11.0 <= completing.effective_duration <= 16.0
+    assert completing.scene.steps[-1].wait_after >= 2.0
+    assert pythagorean.scene.steps[-1].wait_after >= 2.0
+
+
+def test_render_cli_exposes_independent_pacing_option():
+    result = CliRunner().invoke(main, ["render", "--help"])
+    assert result.exit_code == 0
+    assert "--pacing [preserve|teaching|accelerated]" in result.output
+    assert "--pacing-qa / --no-pacing-qa" in result.output
+
+
+def test_compile_quality_profiles_do_not_change_teaching_duration(tmp_path):
+    scene_path = tmp_path / "scene.json"
+    scene_path.write_text(json.dumps(pacing_scene().model_dump(by_alias=True), ensure_ascii=False), encoding="utf-8")
+    durations = []
+    for profile in ("preview", "strict", "final"):
+        result = compile_scene_file(scene_path, tmp_path / profile, profile=profile, pacing_profile="teaching", use_cache=False)
+        assert result["ok"], result
+        durations.append(result["effective_duration"])
+    assert durations[0] == durations[1] == durations[2]
+
+
+def test_storyboard_duration_precedes_narration_when_dsl_timing_is_implicit():
+    scene = pacing_scene()
+    step = scene.steps[0]
+    step.actions[0].run_time = None
+    step.wait_after = None
+    step.storyboard_event_id = "event"
+    step.narration_cue_id = "cue"
+    plan = TeachingPlan.model_validate(
+        {
+            "id": "plan",
+            "topic": "topic",
+            "audience_level": "school",
+            "duration_seconds": 10,
+            "learning_goals": [],
+            "teaching_sequence": [],
+            "narration_cues": [{"id": "cue", "text": "text", "duration_seconds": 3}],
+        }
+    )
+    storyboard = Storyboard.model_validate(
+        {
+            "id": "storyboard",
+            "plan_id": "plan",
+            "frames": [
+                {
+                    "id": "frame",
+                    "duration_seconds": 4,
+                    "visual_events": [{"id": "event", "intent": "show", "duration_seconds": 4}],
+                }
+            ],
+        }
+    )
+    targets = build_step_duration_targets(scene, plan, storyboard)
+    result = apply_pacing(scene, "teaching", step_duration_targets=targets)
+    assert result.effective_timeline[0]["effective_duration"] == 4.0
+    assert any(change.get("source_kind") == "storyboard_event" for change in result.timing_changes)

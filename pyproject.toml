@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
   "click",
   "pydantic>=2",
+  "PyYAML>=6",
   "typing-extensions",
 ]
 

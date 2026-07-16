@@ -9,32 +9,42 @@ from typing import Any, Dict, Set
 from manim_cli import __version__ as manim_cli_version
 from manim_cli.build import build_manifest, content_hash, write_build_manifest
 from manim_cli.dsl.cost import scene_cost
+from manim_cli.dsl.fingerprints import layout_cache_identity, layout_cache_key
 from manim_cli.dsl.layout import estimate_bbox, slot_center, slot_region
+from manim_cli.dsl.knowledge import compile_policy_changes
 from manim_cli.dsl.models import COLORS, DIRECTIONS, RATE_FUNCS, SceneDef
 from manim_cli.dsl.names import safe_var_name
 from manim_cli.dsl.optimizer import MERGEABLE_ACTIONS, collect_mergeable_actions, optimize_scene
+from manim_cli.dsl.pacing import PACING_PROFILES, PacingProfile, apply_pacing, build_step_duration_targets, timing_alignment_diagnostics
 from manim_cli.dsl.registry import ACTION_REGISTRY, MOBJECT_REGISTRY, emit_position, emit_style
 from manim_cli.dsl.splitting import storyboard_split_plans
 from manim_cli.dsl.templates import layout_template_diagnostics
 from manim_cli.dsl.validators import parse_and_validate_scene_data
 from manim_cli.dsl.writer import CodeWriter
 from manim_cli.jsonio import Diagnostic, error_result, load_json, ok_result, write_json
-from manim_cli.render.bbox_probe import probe_scene_tex_bboxes
+from manim_cli.render.bbox_probe import BBoxProbeResult, probe_scene_tex_bboxes
+from manim_cli.planning.pedagogy import load_plan, load_storyboard
 
 MATERIAL_LAYOUT_SCALE_THRESHOLD = 0.9
 
 
 class CompileContext:
-    def __init__(self, scene: SceneDef) -> None:
+    def __init__(
+        self,
+        scene: SceneDef,
+        initial_layout_changes: list[Dict[str, Any]] | None = None,
+        tex_probe_results: Dict[str, BBoxProbeResult] | None = None,
+    ) -> None:
         self.scene = scene
         self.id_to_var: Dict[str, str] = {}
         self.var_to_id: Dict[str, str] = {}
         self.layout_changes: list[Dict[str, Any]] = layout_template_diagnostics(scene)
         self.layout_changes.extend({"change": "storyboard_split_plan", **plan} for plan in storyboard_split_plans(scene))
+        self.layout_changes.extend(initial_layout_changes or [])
         self.compile_warnings: list[Dict[str, Any]] = []
         self.current_step_metadata: Dict[str, Any] = {}
         self.template_by_signature: Dict[str, str] = {}
-        self.tex_probe_results = probe_scene_tex_bboxes(scene)
+        self.tex_probe_results = tex_probe_results if tex_probe_results is not None else probe_scene_tex_bboxes(scene)
         used: Set[str] = set()
         for mob in scene.mobjects:
             var_name = safe_var_name(mob.id, used)
@@ -60,12 +70,18 @@ class CompileContext:
         return metadata
 
 
-def compile_scene_file(scene_path: Path, out_dir: Path, profile: str = "strict", use_cache: bool = True) -> Diagnostic:
+def compile_scene_file(
+    scene_path: Path,
+    out_dir: Path,
+    profile: str = "strict",
+    use_cache: bool = True,
+    pacing_profile: PacingProfile = "preserve",
+) -> Diagnostic:
     if profile not in ("strict", "fast", "preview", "final", "debug"):
         return error_result("compile", "invalid_enum", "profile must be strict, fast, preview, final, or debug")
+    if pacing_profile not in PACING_PROFILES:
+        return error_result("compile", "invalid_enum", "pacing_profile must be preserve, teaching, or accelerated")
     try:
-        raw = scene_path.read_bytes()
-        scene_hash = content_hash(raw)
         data = load_json(scene_path)
     except Exception as exc:
         return error_result("compile", "invalid_json", str(exc), location={"file": str(scene_path)})
@@ -75,33 +91,92 @@ def compile_scene_file(scene_path: Path, out_dir: Path, profile: str = "strict",
     if not validation.get("ok"):
         return validation
     try:
-        return compile_scene(parsed.scene, out_dir, profile=profile, use_cache=use_cache, scene_hash=scene_hash)
+        policy_changes = compile_policy_changes(parsed.scene, scene_path.parent, profile="final" if profile == "final" else "relaxed")
+        plan = load_plan(scene_path.parent, parsed.scene.plan_ref)
+        storyboard = load_storyboard(scene_path.parent, parsed.scene.storyboard_ref)
+        cache_identity = layout_cache_identity(parsed.scene, scene_path.parent)
+        blocking_policy_changes = [
+            change
+            for change in policy_changes
+            if change.get("change") in {"layout_policy_conflict", "layout_policy_budget_exceeded"}
+            or (change.get("change") == "layout_memory_policy_applied" and change.get("policy_type") == "block")
+        ]
+        if profile in ("strict", "final") and blocking_policy_changes:
+            first = blocking_policy_changes[0]
+            return error_result(
+                "compile",
+                str(first.get("change")),
+                "Active layout policy blocked compilation.",
+                location={"file": str(scene_path)},
+                details={"policy_changes": blocking_policy_changes, "profile": profile},
+            )
+        return compile_scene(
+            parsed.scene,
+            out_dir,
+            profile=profile,
+            use_cache=use_cache,
+            scene_hash=cache_identity["source_fingerprint"],
+            initial_layout_changes=policy_changes,
+            cache_identity=cache_identity,
+            pacing_profile=pacing_profile,
+            step_duration_targets=build_step_duration_targets(parsed.scene, plan, storyboard),
+            timing_alignment_context=(plan, storyboard),
+        )
     except Exception as exc:
         details = {"traceback": traceback.format_exc()} if profile == "debug" else None
         return error_result("compile", "compile_internal_error", str(exc), location={"file": str(scene_path)}, details=details)
 
 
-def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_cache: bool = True, scene_hash: str | None = None) -> Diagnostic:
+def compile_scene(
+    scene: SceneDef,
+    out_dir: Path,
+    profile: str = "strict",
+    use_cache: bool = True,
+    scene_hash: str | None = None,
+    initial_layout_changes: list[Dict[str, Any]] | None = None,
+    cache_identity: Dict[str, Any] | None = None,
+    pacing_profile: PacingProfile = "preserve",
+    step_duration_targets: Dict[str, Dict[str, Any]] | None = None,
+    timing_alignment_context: tuple[Any, Any] | None = None,
+) -> Diagnostic:
     if scene is None:
         return error_result("compile", "invalid_scene", "Scene did not parse successfully")
-    scene = optimize_scene(scene, profile)
+    source_scene = scene
+    pacing = apply_pacing(scene, pacing_profile, step_duration_targets=step_duration_targets)
+    scene = optimize_scene(pacing.scene, profile)
     out_dir.mkdir(parents=True, exist_ok=True)
     scene_py_path = out_dir / "scene.py"
     source_map_path = out_dir / "scene.py.map.json"
     cache_path = out_dir / ".compile-cache.json"
+    analysis_cache_path = out_dir / ".layout-analysis-cache.json"
     manifest_path = out_dir / "build_manifest.json"
-    scene_hash = scene_hash or content_hash(scene_canonical_json(scene).encode("utf-8"))
+    cache_identity = cache_identity or layout_cache_identity(scene, None)
+    scene_hash = scene_hash or str(cache_identity["source_fingerprint"])
     manifest = build_manifest(scene_hash, profile)
     manim_version = manifest.get("manim_version") or "unknown"
     generator_hash = compiler_generator_hash()
     manifest["generator_hash"] = generator_hash
-    cache_key = content_hash(f"{scene_hash}:{profile}:{manim_cli_version}:{manim_version}:{generator_hash}".encode("utf-8"))
+    policy_change_hash = content_hash(json.dumps(initial_layout_changes or [], ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    analysis_cache_key = layout_cache_key(cache_identity)
+    cache_key = content_hash(
+        f"{scene_hash}:{analysis_cache_key}:{profile}:{pacing_profile}:{manim_cli_version}:{manim_version}:{generator_hash}:{policy_change_hash}".encode("utf-8")
+    )
 
+    cache_warning: Dict[str, Any] | None = None
     if use_cache and cache_path.exists() and scene_py_path.exists() and source_map_path.exists():
-        cached = load_json(cache_path)
-        if cached.get("cache_key") == cache_key:
+        try:
+            cached = load_json(cache_path)
+            if not isinstance(cached, dict):
+                raise ValueError("cache root must be an object")
+        except Exception as exc:
+            cached = {}
+            cache_warning = {"type": "compile_cache_corrupt", "message": str(exc), "path": str(cache_path)}
+        if cached.get("cache_key") == cache_key and cached.get("cache_identity") == cache_identity:
             manifest = write_build_manifest(manifest_path, scene_hash, profile)
             manifest["generator_hash"] = generator_hash
+            manifest["pacing_profile"] = pacing_profile
+            manifest["source_duration"] = round(pacing.source_duration, 3)
+            manifest["effective_duration"] = round(pacing.effective_duration, 3)
             write_json(manifest_path, manifest)
             return ok_result(
                 "compile",
@@ -111,14 +186,44 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
                 cached=True,
                 profile=profile,
                 cache_key=cache_key,
+                cache_identity=cache_identity,
+                analysis_cached=True,
                 cost=scene_cost(scene),
-                layout_changes=[],
+                layout_changes=cached.get("layout_changes", []),
                 warnings=cached.get("compile_warnings", []),
                 build_manifest=str(manifest_path),
                 manifest=manifest,
+                **pacing.diagnostic_fields(),
+                timing_alignment=timing_alignment_diagnostics(source_scene, pacing, *(timing_alignment_context or (None, None))),
             )
 
-    ctx = CompileContext(scene)
+    analysis_cached = False
+    tex_probe_results: Dict[str, BBoxProbeResult] | None = None
+    if use_cache and analysis_cache_path.exists():
+        try:
+            cached_analysis = load_json(analysis_cache_path)
+            if not isinstance(cached_analysis, dict):
+                raise ValueError("analysis cache root must be an object")
+            if cached_analysis.get("analysis_cache_key") == analysis_cache_key:
+                tex_probe_results = deserialize_tex_probe_results(cached_analysis.get("tex_probe_results", {}))
+                analysis_cached = True
+        except Exception as exc:
+            cache_warning = {"type": "layout_analysis_cache_corrupt", "message": str(exc), "path": str(analysis_cache_path)}
+    if tex_probe_results is None:
+        tex_probe_results = probe_scene_tex_bboxes(scene)
+        if use_cache:
+            write_json(
+                analysis_cache_path,
+                {
+                    "analysis_cache_key": analysis_cache_key,
+                    "cache_identity": {key: value for key, value in cache_identity.items() if key != "source_fingerprint"},
+                    "tex_probe_results": serialize_tex_probe_results(tex_probe_results),
+                },
+            )
+
+    ctx = CompileContext(scene, initial_layout_changes=initial_layout_changes, tex_probe_results=tex_probe_results)
+    if cache_warning:
+        ctx.compile_warnings.append(cache_warning)
     writer = CodeWriter()
     imports = collect_imports(scene)
     emit_header(writer, imports, scene)
@@ -139,22 +244,30 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
                 location={"file": str(scene_py_path), "source_map": str(source_map_path)},
             )
 
-    write_json(
-        cache_path,
-        {
-            "cache_key": cache_key,
-            "scene_hash": scene_hash,
-            "profile": profile,
-            "manim_cli_version": manim_cli_version,
-            "manim_version": manim_version,
-            "generator_hash": generator_hash,
-            "compile_warnings": ctx.compile_warnings,
-            "scene_py": str(scene_py_path),
-            "source_map": str(source_map_path),
-        },
-    )
+    if use_cache:
+        write_json(
+            cache_path,
+            {
+                "cache_key": cache_key,
+                "cache_identity": cache_identity,
+                "analysis_cache_key": analysis_cache_key,
+                "scene_hash": scene_hash,
+                "profile": profile,
+                "pacing_profile": pacing_profile,
+                "manim_cli_version": manim_cli_version,
+                "manim_version": manim_version,
+                "generator_hash": generator_hash,
+                "compile_warnings": ctx.compile_warnings,
+                "layout_changes": ctx.layout_changes,
+                "scene_py": str(scene_py_path),
+                "source_map": str(source_map_path),
+            },
+        )
     manifest = write_build_manifest(manifest_path, scene_hash, profile)
     manifest["generator_hash"] = generator_hash
+    manifest["pacing_profile"] = pacing_profile
+    manifest["source_duration"] = round(pacing.source_duration, 3)
+    manifest["effective_duration"] = round(pacing.effective_duration, 3)
     write_json(manifest_path, manifest)
 
     return ok_result(
@@ -165,11 +278,15 @@ def compile_scene(scene: SceneDef, out_dir: Path, profile: str = "strict", use_c
         cached=False,
         profile=profile,
         cache_key=cache_key,
+        cache_identity=cache_identity,
+        analysis_cached=analysis_cached,
         cost=scene_cost(scene),
         layout_changes=ctx.layout_changes,
         warnings=ctx.compile_warnings,
         build_manifest=str(manifest_path),
         manifest=manifest,
+        **pacing.diagnostic_fields(),
+        timing_alignment=timing_alignment_diagnostics(source_scene, pacing, *(timing_alignment_context or (None, None))),
     )
 
 
@@ -179,9 +296,46 @@ def compiler_generator_hash() -> str:
         Path(__file__).with_name("layout.py"),
         Path(__file__).with_name("registry.py"),
         Path(__file__).with_name("templates.py"),
+        Path(__file__).with_name("fingerprints.py"),
+        Path(__file__).with_name("pacing.py"),
     ]
     payload = b"".join(path.read_bytes() for path in paths)
     return content_hash(payload)
+
+
+def serialize_tex_probe_results(results: Dict[str, BBoxProbeResult]) -> Dict[str, Any]:
+    serialized: Dict[str, Any] = {}
+    for object_id, result in results.items():
+        bbox = result.bbox
+        serialized[object_id] = {
+            "status": result.status,
+            "bbox": [bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max] if bbox else None,
+            "method": result.method,
+            "message": result.message,
+        }
+    return serialized
+
+
+def deserialize_tex_probe_results(data: Any) -> Dict[str, BBoxProbeResult]:
+    if not isinstance(data, dict):
+        raise ValueError("tex_probe_results must be an object")
+    results: Dict[str, BBoxProbeResult] = {}
+    for object_id, item in data.items():
+        if not isinstance(item, dict) or item.get("status") not in ("measured", "unavailable"):
+            raise ValueError(f"invalid bbox probe cache entry for {object_id}")
+        bbox_data = item.get("bbox")
+        bbox = None
+        if bbox_data is not None:
+            if not isinstance(bbox_data, list) or len(bbox_data) != 4:
+                raise ValueError(f"invalid bbox coordinates for {object_id}")
+            bbox = BBox(*(float(value) for value in bbox_data))
+        results[str(object_id)] = BBoxProbeResult(
+            status=item["status"],
+            bbox=bbox,
+            method=str(item.get("method", "cached")),
+            message=str(item.get("message", "")),
+        )
+    return results
 
 
 def collect_imports(scene: SceneDef) -> Set[str]:

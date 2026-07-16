@@ -197,8 +197,8 @@ def point3(value: Any) -> Tuple[float, float, float]:
     return (float(padded[0]), float(padded[1]), float(padded[2]))
 
 
-def layout_warnings(scene: SceneDef) -> List[Dict[str, Any]]:
-    boxes = estimate_bboxes(scene)
+def layout_warnings(scene: SceneDef, tex_probe_results: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    boxes = estimate_bboxes(scene, tex_probe_results=tex_probe_results)
     bounds = frame_bounds(scene)
     warnings: List[Dict[str, Any]] = []
     mob_by_id = {mob.id: mob for mob in scene.mobjects}

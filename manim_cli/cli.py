@@ -10,6 +10,7 @@ from manim_cli.commands.diagnose_cmd import diagnose_cmd
 from manim_cli.commands.init_cmd import init_cmd
 from manim_cli.commands.knowledge_cmd import knowledge_group
 from manim_cli.commands.manifest_cmd import manifest_cmd
+from manim_cli.commands.memory_cmd import memory_group
 from manim_cli.commands.migrate_layout_cmd import migrate_layout_cmd
 from manim_cli.commands.plan_cmd import plan_group
 from manim_cli.commands.qa_cmd import qa_cmd
@@ -31,6 +32,7 @@ def main() -> None:
 
 main.add_command(init_cmd, "init")
 main.add_command(knowledge_group, "knowledge")
+main.add_command(memory_group, "memory")
 main.add_command(plan_group, "plan")
 main.add_command(storyboard_group, "storyboard")
 main.add_command(validate_cmd, "validate")

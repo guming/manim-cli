@@ -37,6 +37,21 @@ def probe_available() -> bool:
     return latex_available() and dvisvgm_available() and _probe_smoke_available()
 
 
+def probe_diagnostic() -> Dict[str, object]:
+    missing: List[str] = []
+    if not latex_available():
+        missing.append("latex")
+    if not dvisvgm_available():
+        missing.append("dvisvgm")
+    if missing:
+        return {"ready": False, "method": "dependency_missing", "message": f"LaTeX bbox probe requires: {', '.join(missing)}"}
+    try:
+        width, height = _compile_and_measure("x")
+    except Exception as exc:
+        return {"ready": False, "method": "compilation_failed", "message": str(exc)}
+    return {"ready": width > 0 and height > 0, "method": "latex_dvisvgm", "message": f"probe measured {width:.1f}pt x {height:.1f}pt"}
+
+
 @lru_cache(maxsize=1)
 def _probe_smoke_available() -> bool:
     if not latex_available() or not dvisvgm_available():
@@ -99,13 +114,21 @@ def _compile_and_measure(tex: str) -> Tuple[float, float]:
         if compile_result.returncode != 0 or not dvi_file.exists():
             raise RuntimeError("LaTeX compilation failed or produced no DVI")
         svg_result = subprocess.run(
-            ["dvisvgm", "--no-fonts", "--exact-bbox", "-o", "-", str(dvi_file)],
+            ["dvisvgm", "--no-fonts", "--exact-bbox", "-o-", str(dvi_file)],
             capture_output=True,
             timeout=15,
             cwd=str(work),
         )
         if svg_result.returncode != 0:
-            raise RuntimeError("dvisvgm conversion failed")
+            stderr = svg_result.stderr.decode("utf-8", errors="replace").strip()
+            lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+            relevant = [
+                line
+                for line in lines
+                if "error" in line.lower() or "none of the default map files" in line.lower() or "not found" in line.lower()
+            ]
+            detail = "; ".join((relevant or lines)[-6:]) if lines else "no stderr"
+            raise RuntimeError(f"dvisvgm conversion failed: {detail}")
         svg_content = svg_result.stdout.decode("utf-8", errors="replace")
         return _parse_svg_dimensions(svg_content)
 

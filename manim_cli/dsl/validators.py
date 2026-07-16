@@ -59,7 +59,7 @@ def parse_and_validate_scene_data(data: Any, file: str = "scene.json", base_dir:
     if semantic:
         return ParsedSceneValidation(semantic, scene)
     scene = resolve_layout_roles(scene)
-    warnings = quality_warnings(scene, base_dir=base_dir) if quality_gate != "off" else []
+    warnings = quality_warnings(scene, base_dir=base_dir, profile=quality_gate) if quality_gate != "off" else []
     if quality_gate in ("strict", "final") and warnings:
         first = warnings[0]
         return ParsedSceneValidation(
@@ -89,11 +89,11 @@ def parse_scene_data(data: Any) -> SceneDef:
     return resolve_layout_roles(SceneDef.model_validate(data))
 
 
-def quality_warnings(scene: SceneDef, base_dir: Optional[Path] = None) -> list[Dict[str, Any]]:
+def quality_warnings(scene: SceneDef, base_dir: Optional[Path] = None, profile: str = "relaxed") -> list[Dict[str, Any]]:
     warnings: list[Dict[str, Any]] = []
     warnings.extend(unresolved_layout_role_warnings(scene))
     warnings.extend(storyboard_split_plans(scene))
-    warnings.extend(policy_warnings(scene, base_dir))
+    warnings.extend(policy_warnings(scene, base_dir, profile=profile))
     warnings.extend(layout_warnings(scene))
     plan = load_plan(base_dir, scene.plan_ref)
     storyboard = load_storyboard(base_dir, scene.storyboard_ref)
@@ -344,6 +344,7 @@ def validate_action_params(action: ActionDef, file: str, path: str) -> Optional[
         "wait": {"type", "duration"},
         "layout": {"type", "target", "slot", "region", "run_time", "rate_func"},
     }[action.type]
+    allowed.add("timing_role")
     extra = sorted(populated - allowed)
     if extra:
         field = extra[0]

@@ -7,6 +7,7 @@ import click
 from manim_cli.jsonio import load_json, print_json
 from manim_cli.render.bbox_probe import probe_tex_bbox
 from manim_cli.render.frames import analyze_video_keyframes
+from manim_cli.render.smoke import render_toolchain_status, run_measured_layout_render_smoke
 from manim_cli.render.visual_qa import analyze_keyframe
 
 
@@ -39,3 +40,18 @@ def bbox_probe_cmd(tex: str, font_size: int) -> None:
     result = probe_tex_bbox(tex, font_size=font_size)
     bbox = None if result.bbox is None else {"left": result.bbox.left, "bottom": result.bbox.bottom, "right": result.bbox.right, "top": result.bbox.top}
     print_json({"ok": result.status == "measured", "phase": "bbox_probe", "status": result.status, "bbox": bbox, "method": result.method, "message": result.message})
+
+
+@visual_qa_group.command("render-smoke")
+@click.argument("scene_json", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--out", "output", type=click.Path(dir_okay=False, path_type=Path), default=Path("render-smoke.mp4"), show_default=True)
+@click.option("--expect", "expectation", type=click.Choice(["measured_safe", "measured_contradiction"]), required=True)
+def render_smoke_cmd(scene_json: Path, output: Path, expectation: str) -> None:
+    """Run measured-layout smoke and draft-render the safe path when dependencies work."""
+    print_json(run_measured_layout_render_smoke(scene_json, output, expectation))  # type: ignore[arg-type]
+
+
+@visual_qa_group.command("toolchain-status")
+def toolchain_status_cmd() -> None:
+    """Report whether the real measured-layout render toolchain is usable."""
+    print_json({"ok": True, "phase": "render_toolchain_status", **render_toolchain_status()})

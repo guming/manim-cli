@@ -13,6 +13,8 @@ ERROR_IN_STRICT = {
     "math_symbol_type_drift",
     "step_frame_timing_drift",
     "cue_event_timing_drift",
+    "layout_policy_budget_exceeded",
+    "layout_policy_conflict",
 }
 
 
@@ -20,6 +22,10 @@ def warning_to_issue(warning: Dict[str, Any], profile: str = "relaxed", file: st
     warning_type = warning.get("type", "quality_warning")
     severity: Severity = "warning"
     if profile in ("strict", "final") and warning_type in ERROR_IN_STRICT:
+        severity = "error"
+    if profile in ("strict", "final") and warning_type == "pacing_duration_compression" and warning.get("blocking"):
+        severity = "error"
+    if profile in ("strict", "final") and warning_type == "layout_memory_policy_applied" and warning.get("policy_type") == "block":
         severity = "error"
     if warning_type == "layout_needs_visual_qa":
         severity = "warning"
@@ -72,6 +78,14 @@ def message_for_warning(warning: Dict[str, Any]) -> str:
         return "Scene step duration drifts from storyboard frame duration"
     if warning_type == "cue_event_timing_drift":
         return "Scene step duration drifts from its narration cue or visual event duration"
+    if warning_type == "pacing_duration_compression":
+        return "Effective pacing compresses the source timeline too aggressively"
+    if warning_type == "pacing_actual_duration_drift":
+        return "Rendered video duration drifts from the effective timeline"
+    if warning_type == "pacing_conclusion_hold_too_short":
+        return "Final conclusion is not visible long enough"
+    if warning_type == "pacing_transform_hold_too_short":
+        return "A transformed formula advances before viewers can read it"
     return warning_type.replace("_", " ")
 
 
@@ -94,6 +108,14 @@ def repair_hint_for_warning(warning: Dict[str, Any]) -> str:
         return "Adjust action run_time, wait_after, or the storyboard frame duration for this visual event."
     if warning_type == "cue_event_timing_drift":
         return "Adjust action run_time, wait_after, or the narration cue / visual event duration_seconds so they match."
+    if warning_type == "pacing_duration_compression":
+        return "Use preserve/teaching pacing or mark only decorative transitions as accelerated."
+    if warning_type == "pacing_actual_duration_drift":
+        return "Inspect generated timing and Manim output; the rendered duration must match the effective timeline."
+    if warning_type == "pacing_conclusion_hold_too_short":
+        return "Keep the final answer/caption visible for at least 2 seconds."
+    if warning_type == "pacing_transform_hold_too_short":
+        return "Add at least 0.4 seconds of hold time after the transform."
     if warning_type == "math_denominator_zero":
         return "Change the denominator expression or add a domain restriction before showing this equation."
     if warning_type == "math_undefined_symbol":

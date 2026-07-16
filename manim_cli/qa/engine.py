@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from manim_cli.dsl.analysis import analyze_scene
-from manim_cli.dsl.knowledge import policy_warnings
+from manim_cli.dsl.knowledge import build_repair_memory_context, policy_warnings
 from manim_cli.dsl.layout import layout_warnings
 from manim_cli.dsl.splitting import storyboard_split_plans
 from manim_cli.dsl.templates import unresolved_layout_role_warnings
@@ -17,6 +17,14 @@ from manim_cli.qa.adapters import warnings_to_issues
 from manim_cli.qa.feedback import write_feedback
 from manim_cli.qa.math_lint import math_warnings
 from manim_cli.qa.timing import timing_warnings
+from manim_cli.dsl.pacing import (
+    PACING_PROFILES,
+    PacingProfile,
+    apply_pacing,
+    build_step_duration_targets,
+    pacing_warnings,
+    timing_alignment_diagnostics,
+)
 
 
 def run_qa(
@@ -26,9 +34,12 @@ def run_qa(
     storyboard_path: Optional[Path] = None,
     out_dir: Optional[Path] = None,
     repair_context: Optional[Dict[str, Any]] = None,
+    pacing_profile: PacingProfile = "teaching",
 ) -> Diagnostic:
     if profile not in ("relaxed", "strict", "final"):
         return error_result("qa", "invalid_enum", "profile must be relaxed, strict, or final")
+    if pacing_profile not in PACING_PROFILES:
+        return error_result("qa", "invalid_enum", "pacing_profile must be preserve, teaching, or accelerated")
     try:
         data = load_json(scene_path)
     except Exception as exc:
@@ -37,19 +48,22 @@ def run_qa(
     parsed = parse_and_validate_scene_data(data, file=str(scene_path), base_dir=scene_path.parent, quality_gate="off")
     if not parsed.diagnostic.get("ok"):
         return parsed.diagnostic
-    scene = parsed.scene
+    source_scene = parsed.scene
+    plan = load_direct_plan(plan_path) if plan_path else load_plan(scene_path.parent, source_scene.plan_ref)
+    storyboard = load_direct_storyboard(storyboard_path) if storyboard_path else load_storyboard(scene_path.parent, source_scene.storyboard_ref)
+    pacing = apply_pacing(source_scene, pacing_profile, step_duration_targets=build_step_duration_targets(source_scene, plan, storyboard))
+    scene = pacing.scene
     analysis = analyze_scene(scene)
-    plan = load_direct_plan(plan_path) if plan_path else load_plan(scene_path.parent, scene.plan_ref)
-    storyboard = load_direct_storyboard(storyboard_path) if storyboard_path else load_storyboard(scene_path.parent, scene.storyboard_ref)
 
     warnings = []
     warnings.extend(unresolved_layout_role_warnings(scene))
     warnings.extend(storyboard_split_plans(scene))
-    warnings.extend(policy_warnings(scene, scene_path.parent))
+    warnings.extend(policy_warnings(scene, scene_path.parent, profile=profile))
     warnings.extend(layout_warnings(scene))
     warnings.extend(pedagogy_warnings(scene, plan, storyboard))
     warnings.extend(alignment_warnings(scene, plan, storyboard))
     warnings.extend(timing_warnings(scene, analysis, storyboard, plan))
+    warnings.extend(pacing_warnings(pacing))
     warnings.extend(math_warnings(scene, plan))
 
     issues = warnings_to_issues(warnings, profile=profile, file=str(scene_path))
@@ -61,10 +75,17 @@ def run_qa(
         issues=issue_dicts,
         summary=summarize_issues(issue_dicts),
         repair_context=repair_context or {},
+        **pacing.diagnostic_fields(),
+        timing_alignment=timing_alignment_diagnostics(source_scene, pacing, plan, storyboard),
     )
     report["ok"] = not any(issue.get("severity") == "error" for issue in issue_dicts)
     report.update(repair_diagnostics(issue_dicts, repair_context))
     if out_dir:
+        report["repair_memory_context"] = build_repair_memory_context(
+            scene,
+            scene_path.parent,
+            issue_types=[issue.get("type", "") for issue in issue_dicts if issue.get("type")],
+        )
         report["feedback"] = write_feedback(out_dir, report)
     return report
 

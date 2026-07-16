@@ -11,13 +11,6 @@ def optimize_scene(scene: SceneDef, profile: str) -> SceneDef:
     optimized = scene.model_copy(deep=True)
     for step in optimized.steps:
         step.actions = merge_wait_actions(step.actions)
-        if step.wait_after is not None:
-            step.wait_after = min(float(step.wait_after), 0.2)
-        for action in step.actions:
-            if action.run_time is not None:
-                action.run_time = preview_duration(float(action.run_time))
-            if action.type == "wait" and action.duration is not None:
-                action.duration = min(float(action.duration), 0.2)
     return optimized
 
 
@@ -51,7 +44,3 @@ def merge_wait_actions(actions: list[Any]) -> list[Any]:
         else:
             merged.append(action)
     return merged
-
-
-def preview_duration(duration: float) -> float:
-    return min(duration, max(0.5, duration * 0.3))

@@ -22,24 +22,31 @@ def timing_warnings(scene: SceneDef, analysis: SceneAnalysis, storyboard: Storyb
 def step_frame_timing_warnings(scene: SceneDef, analysis: SceneAnalysis, storyboard: Storyboard) -> List[Dict[str, object]]:
     event_to_frame = {event.id: frame for frame in storyboard.frames for event in frame.visual_events}
     warnings: List[Dict[str, object]] = []
+    grouped: Dict[str, List[object]] = {}
+    frame_lookup: Dict[str, object] = {}
     for step, timeline_step in zip(scene.steps, analysis.timeline):
         if not step.storyboard_event_id:
             continue
         frame = event_to_frame.get(step.storyboard_event_id)
         if not frame or frame.duration_seconds is None:
             continue
+        grouped.setdefault(frame.id, []).append(timeline_step)
+        frame_lookup[frame.id] = frame
+    for frame_id, timeline_steps in grouped.items():
+        frame = frame_lookup[frame_id]
         frame_duration = float(frame.duration_seconds)
-        step_duration = timeline_step.duration_seconds
-        allowed = allowed_drift_seconds(scene, timeline_step.step_index, frame_duration)
+        step_duration = sum(float(item.duration_seconds) for item in timeline_steps)
+        first_index = int(timeline_steps[0].step_index)
+        allowed = allowed_drift_seconds(scene, first_index, frame_duration)
         drift = abs(step_duration - frame_duration)
         if drift > allowed:
             warnings.append(
                 {
                     "type": "step_frame_timing_drift",
-                    "step": timeline_step.step_id,
-                    "step_index": timeline_step.step_index,
-                    "storyboard_event_id": step.storyboard_event_id,
-                    "frame_id": frame.id,
+                    "step": timeline_steps[0].step_id,
+                    "step_ids": [item.step_id for item in timeline_steps],
+                    "step_index": first_index,
+                    "frame_id": frame_id,
                     "step_duration": round(step_duration, 3),
                     "frame_duration": round(frame_duration, 3),
                     "allowed_drift": round(allowed, 3),

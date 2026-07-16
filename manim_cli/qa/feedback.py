@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
+from manim_cli.dsl.knowledge import render_repair_memory_section
 from manim_cli.jsonio import write_json
 
 
@@ -32,7 +33,11 @@ def render_agent_prompt(report: Dict[str, Any]) -> str:
         hints = issue.get("repair_hints") or []
         if hints:
             lines.append(f"   Repair: {hints[0].get('message')}")
-    return "\n".join(lines) + "\n"
+    prompt = "\n".join(lines) + "\n"
+    memory_section = render_repair_memory_section(report.get("repair_memory_context", {}))
+    if memory_section:
+        prompt += "\n" + memory_section
+    return prompt
 
 
 def issue_sort_key(issue: Dict[str, Any]) -> tuple[int, int, str]:

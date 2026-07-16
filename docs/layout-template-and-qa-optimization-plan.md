@@ -1,5 +1,7 @@
 # Layout QA Stabilization and Future Template/Memory PRD
 
+> Implementation note: release boundaries, policy lifecycle, retrieval budgets, cache identity, and remaining task acceptance criteria are refined in `docs/layout-template-and-qa-optimization-execution-plan.md`. That addendum is the execution source of truth where this PRD leaves future behavior ambiguous.
+
 ## 1. Background
 
 Recent derivative-geometry renders exposed a recurring class of layout failures:
