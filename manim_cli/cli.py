@@ -7,6 +7,7 @@ import click
 
 from manim_cli.commands.compile_cmd import compile_cmd
 from manim_cli.commands.diagnose_cmd import diagnose_cmd
+from manim_cli.commands.example_cmd import example_cmd
 from manim_cli.commands.init_cmd import init_cmd
 from manim_cli.commands.knowledge_cmd import knowledge_group
 from manim_cli.commands.manifest_cmd import manifest_cmd
@@ -17,6 +18,8 @@ from manim_cli.commands.qa_cmd import qa_cmd
 from manim_cli.commands.qa_eval_cmd import qa_eval_cmd
 from manim_cli.commands.regression_cmd import regression_group
 from manim_cli.commands.render_cmd import render_cmd
+from manim_cli.commands.schema_cmd import schema_cmd
+from manim_cli.commands.skill_cmd import skill_group
 from manim_cli.commands.source_map_cmd import source_map_group
 from manim_cli.commands.split_layout_cmd import split_layout_cmd
 from manim_cli.commands.storyboard_cmd import storyboard_group
@@ -31,6 +34,7 @@ def main() -> None:
 
 
 main.add_command(init_cmd, "init")
+main.add_command(example_cmd, "example")
 main.add_command(knowledge_group, "knowledge")
 main.add_command(memory_group, "memory")
 main.add_command(plan_group, "plan")
@@ -40,6 +44,7 @@ main.add_command(compile_cmd, "compile")
 main.add_command(qa_cmd, "qa")
 main.add_command(qa_eval_cmd, "qa-eval")
 main.add_command(render_cmd, "render")
+main.add_command(schema_cmd, "schema")
 main.add_command(diagnose_cmd, "diagnose")
 main.add_command(manifest_cmd, "manifest")
 main.add_command(migrate_layout_cmd, "migrate-layout")
@@ -47,6 +52,7 @@ main.add_command(visual_qa_group, "visual-qa")
 main.add_command(regression_group, "regression")
 main.add_command(source_map_group, "source-map")
 main.add_command(split_layout_cmd, "split-layout")
+main.add_command(skill_group, "skill")
 
 
 def fail_cli(exc: Exception, phase: str = "cli") -> None:

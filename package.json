@@ -1,0 +1,13 @@
+{
+  "name": "skill",
+  "version": "0.1.0",
+  "description": "Installer for the bundled Manim agent skill",
+  "bin": {
+    "skill": "bin/skill.js"
+  },
+  "files": [
+    "bin/skill.js",
+    "manim_cli/agent/skill"
+  ],
+  "license": "MIT"
+}

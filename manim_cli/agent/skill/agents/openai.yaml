@@ -1,0 +1,7 @@
+interface:
+  display_name: "Manim Video"
+  short_description: "Build validated Manim teaching videos"
+  default_prompt: "Use $manim-video to create a concise Manim math teaching video."
+
+policy:
+  allow_implicit_invocation: true

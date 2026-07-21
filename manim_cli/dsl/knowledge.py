@@ -7,7 +7,10 @@ from pathlib import Path
 import tempfile
 from typing import Any, Dict, Iterable, List, Optional
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # JSON-only commands should remain available without optional YAML support.
+    yaml = None
 
 from manim_cli.build import content_hash
 from manim_cli.dsl.models import SceneDef
@@ -260,11 +263,16 @@ def load_document(path: Path, doc_type: str) -> Optional[Dict[str, Any]]:
         if path.suffix.lower() == ".json":
             data = json.loads(text)
         elif path.suffix.lower() in (".yaml", ".yml"):
+            require_yaml()
             data = yaml.safe_load(text)
         else:
             raise MemoryDocumentError(f"unsupported memory document format: {path}")
-    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+    except (OSError, json.JSONDecodeError, MemoryDocumentError) as exc:
         raise MemoryDocumentError(f"invalid {doc_type} document {path}: {exc}") from exc
+    except Exception as exc:
+        if yaml is not None and isinstance(exc, yaml.YAMLError):
+            raise MemoryDocumentError(f"invalid {doc_type} document {path}: {exc}") from exc
+        raise
     if not isinstance(data, dict):
         raise MemoryDocumentError(f"invalid {doc_type} document {path}: root must be an object/mapping")
     data = dict(data)
@@ -290,6 +298,7 @@ def write_memory_document(path: Path, data: Dict[str, Any]) -> None:
     if suffix == ".json":
         content = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     elif suffix in (".yaml", ".yml"):
+        require_yaml()
         content = yaml.safe_dump(data, allow_unicode=True, sort_keys=True)
     else:
         raise MemoryDocumentError(f"unsupported memory document format: {path}")
@@ -879,3 +888,8 @@ def memory_format_suffix(output_format: str) -> str:
     if normalized == "yaml":
         return ".yaml"
     raise MemoryDocumentError(f"unsupported memory output format: {output_format}")
+
+
+def require_yaml() -> None:
+    if yaml is None:
+        raise MemoryDocumentError("PyYAML is required for YAML layout-memory documents; install PyYAML>=6 or use JSON")

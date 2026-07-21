@@ -1,0 +1,72 @@
+{
+  "id": "pythagorean_theorem_plan",
+  "topic": "勾股定理：用面积关系理解 a^2 + b^2 = c^2",
+  "audience_level": "middle school",
+  "duration_seconds": 35,
+  "learning_goals": [
+    "Recognize the legs a, b and hypotenuse c in a right triangle.",
+    "Connect the square on each side to the area expressions a^2, b^2 and c^2.",
+    "Understand that the two leg-square areas combine to match the hypotenuse-square area."
+  ],
+  "teaching_sequence": [
+    {
+      "id": "seq_triangle",
+      "goal": "Introduce a right triangle and its side labels.",
+      "method": "Draw three line segments and write labels a, b and c near the corresponding sides."
+    },
+    {
+      "id": "seq_area_squares",
+      "goal": "Show each side length as a square area.",
+      "method": "Fade in three colored squares with labels a^2, b^2 and c^2."
+    },
+    {
+      "id": "seq_equation",
+      "goal": "State the area relationship.",
+      "method": "Highlight the two smaller areas, then the larger area, and write the final formula."
+    }
+  ],
+  "symbol_ledger": [
+    {
+      "symbol": "a",
+      "meaning": "one leg of the right triangle",
+      "canonical_tex": "a",
+      "color_role": "blue leg"
+    },
+    {
+      "symbol": "b",
+      "meaning": "the other leg of the right triangle",
+      "canonical_tex": "b",
+      "color_role": "green leg"
+    },
+    {
+      "symbol": "c",
+      "meaning": "the hypotenuse of the right triangle",
+      "canonical_tex": "c",
+      "color_role": "gold hypotenuse"
+    },
+    {
+      "symbol": "a^2 + b^2 = c^2",
+      "meaning": "the Pythagorean theorem area relationship",
+      "canonical_tex": "a^2 + b^2 = c^2",
+      "color_role": "final equation"
+    }
+  ],
+  "narration_cues": [
+    {
+      "id": "cue_intro",
+      "text": "在直角三角形中，两条直角边记作 a 和 b，斜边记作 c。"
+    },
+    {
+      "id": "cue_squares",
+      "text": "把每条边都向外作一个正方形，它们的面积分别是 a 的平方、b 的平方和 c 的平方。"
+    },
+    {
+      "id": "cue_relation",
+      "text": "面积重排告诉我们，两个小正方形的面积之和，正好等于斜边上的大正方形面积。"
+    },
+    {
+      "id": "cue_final",
+      "text": "所以，勾股定理就是 a 的平方加 b 的平方等于 c 的平方。"
+    }
+  ]
+}

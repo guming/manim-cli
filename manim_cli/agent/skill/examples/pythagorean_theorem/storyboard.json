@@ -1,0 +1,82 @@
+{
+  "id": "pythagorean_theorem_storyboard",
+  "plan_id": "pythagorean_theorem_plan",
+  "frames": [
+    {
+      "id": "frame_triangle",
+      "section": "Introduce the right triangle",
+      "duration_seconds": 9,
+      "narration_cue_ids": ["cue_intro"],
+      "visual_events": [
+        {
+          "id": "event_draw_triangle",
+          "intent": "Draw the right triangle from three MVP Line mobjects.",
+          "focus": ["leg_a", "leg_b", "hypotenuse_c"]
+        },
+        {
+          "id": "event_label_sides",
+          "intent": "Write a, b and c labels near the three sides.",
+          "focus": ["label_a", "label_b", "label_c"]
+        }
+      ],
+      "layout_constraints": {
+        "triangle_area": "left side of frame",
+        "title": "top edge"
+      }
+    },
+    {
+      "id": "frame_squares",
+      "section": "Attach area squares to the sides",
+      "duration_seconds": 14,
+      "narration_cue_ids": ["cue_squares"],
+      "visual_events": [
+        {
+          "id": "event_show_area_squares",
+          "intent": "Fade in three colored Square mobjects representing side-square areas.",
+          "focus": ["square_a_area", "square_b_area", "square_c_area"]
+        },
+        {
+          "id": "event_label_areas",
+          "intent": "Write labels a^2, b^2 and c^2 on the squares.",
+          "focus": ["area_label_a2", "area_label_b2", "area_label_c2"]
+        }
+      ],
+      "layout_constraints": {
+        "area_squares": "right side of frame as symbolic area blocks",
+        "avoid_overlap": true
+      }
+    },
+    {
+      "id": "frame_relation",
+      "section": "Emphasize the area relationship",
+      "duration_seconds": 8,
+      "narration_cue_ids": ["cue_relation"],
+      "visual_events": [
+        {
+          "id": "event_highlight_small_areas",
+          "intent": "Indicate the a^2 and b^2 squares, then the c^2 square.",
+          "focus": ["square_a_area", "square_b_area", "square_c_area"]
+        }
+      ],
+      "layout_constraints": {
+        "focus": "color highlights connect smaller areas to larger area"
+      }
+    },
+    {
+      "id": "frame_formula",
+      "section": "Final theorem statement",
+      "duration_seconds": 4,
+      "narration_cue_ids": ["cue_final"],
+      "visual_events": [
+        {
+          "id": "event_final_formula",
+          "intent": "Write the final formula and a short conclusion.",
+          "focus": ["formula", "conclusion"]
+        }
+      ],
+      "layout_constraints": {
+        "formula": "bottom center"
+      }
+    }
+  ]
+}

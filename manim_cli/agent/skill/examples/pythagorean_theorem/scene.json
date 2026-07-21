@@ -1,0 +1,255 @@
+{
+  "$schema": "https://manim-cli/schema/v1/scene.json",
+  "version": "1.1",
+  "name": "pythagorean_theorem",
+  "description": "A short MVP DSL lesson explaining the Pythagorean theorem with a right triangle and area squares.",
+  "layout_template": "formula_then_caption",
+  "plan_ref": "plan.json",
+  "storyboard_ref": "storyboard.json",
+  "config": {
+    "resolution": [1920, 1080],
+    "frame_height": 8,
+    "background_color": "#1e1e1e",
+    "fps": 30,
+    "visual_theme": "casual_3b1b"
+  },
+  "mobjects": [
+    {
+      "id": "title",
+      "type": "Text",
+      "args": {"text": "勾股定理", "font_size": 38},
+      "style": {"color": "WHITE"},
+      "layout_role": "title.primary",
+      "position": {"mode": "edge", "edge": "UP", "buff": 0.35}
+    },
+    {
+      "id": "leg_a",
+      "type": "Line",
+      "args": {"start": [-5.2, -1.6, 0], "end": [-2.2, -1.6, 0], "coordinate_space": "screen"},
+      "style": {"stroke_color": "BLUE", "stroke_width": 8}
+    },
+    {
+      "id": "leg_b",
+      "type": "Line",
+      "args": {"start": [-5.2, -1.6, 0], "end": [-5.2, 1.0, 0], "coordinate_space": "screen"},
+      "style": {"stroke_color": "GREEN", "stroke_width": 8}
+    },
+    {
+      "id": "hypotenuse_c",
+      "type": "Line",
+      "args": {"start": [-5.2, 1.0, 0], "end": [-2.2, -1.6, 0], "coordinate_space": "screen"},
+      "style": {"stroke_color": "GOLD", "stroke_width": 8}
+    },
+    {
+      "id": "right_angle_mark_h",
+      "type": "Line",
+      "args": {"start": [-5.2, -1.25, 0], "end": [-4.85, -1.25, 0], "coordinate_space": "screen"},
+      "style": {"stroke_color": "WHITE", "stroke_width": 4}
+    },
+    {
+      "id": "right_angle_mark_v",
+      "type": "Line",
+      "args": {"start": [-4.85, -1.25, 0], "end": [-4.85, -1.6, 0], "coordinate_space": "screen"},
+      "style": {"stroke_color": "WHITE", "stroke_width": 4}
+    },
+    {
+      "id": "label_a",
+      "type": "Text",
+      "args": {"text": "a", "font_size": 46},
+      "style": {"color": "BLUE"},
+      "position": {"mode": "absolute", "point": [-3.7, -2.05, 0]}
+    },
+    {
+      "id": "label_b",
+      "type": "Text",
+      "args": {"text": "b", "font_size": 46},
+      "style": {"color": "GREEN"},
+      "position": {"mode": "absolute", "point": [-5.65, -0.3, 0]}
+    },
+    {
+      "id": "label_c",
+      "type": "Text",
+      "args": {"text": "c", "font_size": 46},
+      "style": {"color": "GOLD"},
+      "position": {"mode": "absolute", "point": [-3.45, 0.0, 0]}
+    },
+    {
+      "id": "square_a_area",
+      "type": "Square",
+      "args": {"side_length": 1.2},
+      "style": {"fill_color": "BLUE", "fill_opacity": 0.35, "stroke_color": "BLUE", "stroke_width": 5},
+      "position": {"mode": "absolute", "point": [1.15, 1.35, 0]}
+    },
+    {
+      "id": "square_b_area",
+      "type": "Square",
+      "args": {"side_length": 1.45},
+      "style": {"fill_color": "GREEN", "fill_opacity": 0.35, "stroke_color": "GREEN", "stroke_width": 5},
+      "position": {"mode": "absolute", "point": [3.0, 1.35, 0]}
+    },
+    {
+      "id": "square_c_area",
+      "type": "Square",
+      "args": {"side_length": 1.85},
+      "style": {"fill_color": "GOLD", "fill_opacity": 0.32, "stroke_color": "GOLD", "stroke_width": 5},
+      "position": {"mode": "absolute", "point": [2.1, -0.75, 0]}
+    },
+    {
+      "id": "area_label_a2",
+      "type": "Text",
+      "args": {"text": "a²", "font_size": 40},
+      "style": {"color": "BLUE"},
+      "position": {"mode": "absolute", "point": [1.15, 1.35, 0]}
+    },
+    {
+      "id": "area_label_b2",
+      "type": "Text",
+      "args": {"text": "b²", "font_size": 40},
+      "style": {"color": "GREEN"},
+      "position": {"mode": "absolute", "point": [3.0, 1.35, 0]}
+    },
+    {
+      "id": "area_label_c2",
+      "type": "Text",
+      "args": {"text": "c²", "font_size": 44},
+      "style": {"color": "GOLD"},
+      "position": {"mode": "absolute", "point": [2.1, -0.75, 0]}
+    },
+    {
+      "id": "plus_label",
+      "type": "Text",
+      "args": {"text": "+", "font_size": 40},
+      "style": {"color": "WHITE"},
+      "position": {"mode": "absolute", "point": [2.08, 1.35, 0]}
+    },
+    {
+      "id": "equals_label",
+      "type": "Text",
+      "args": {"text": "=", "font_size": 40},
+      "style": {"color": "WHITE"},
+      "position": {"mode": "absolute", "point": [2.08, 0.25, 0]}
+    },
+    {
+      "id": "formula",
+      "type": "Text",
+      "args": {"text": "a² + b² = c²", "font_size": 56},
+      "style": {"color": "YELLOW"},
+      "layout_role": "formula.primary",
+      "layout": {"slot": "bottom_formula"}
+    },
+    {
+      "id": "conclusion",
+      "type": "Text",
+      "args": {"text": "两条直角边的平方和，等于斜边的平方", "font_size": 24},
+      "style": {"color": "WHITE"},
+      "layout_role": "caption.conclusion",
+      "layout": {"slot": "caption"}
+    }
+  ],
+  "steps": [
+    {
+      "id": "step_title",
+      "name": "Show title",
+      "narration_cue_id": "cue_intro",
+      "storyboard_event_id": "event_draw_triangle",
+      "actions": [{"type": "write", "target": "title", "run_time": 0.8}],
+      "wait_after": 0.2
+    },
+    {
+      "id": "step_triangle",
+      "name": "Draw the right triangle",
+      "narration_cue_id": "cue_intro",
+      "storyboard_event_id": "event_draw_triangle",
+      "actions": [
+        {"type": "show_creation", "target": "leg_a", "run_time": 0.7},
+        {"type": "show_creation", "target": "leg_b", "run_time": 0.7},
+        {"type": "show_creation", "target": "hypotenuse_c", "run_time": 0.9},
+        {"type": "show_creation", "target": "right_angle_mark_h", "run_time": 0.3},
+        {"type": "show_creation", "target": "right_angle_mark_v", "run_time": 0.3}
+      ],
+      "wait_after": 0.3
+    },
+    {
+      "id": "step_side_labels",
+      "name": "Label the triangle sides",
+      "narration_cue_id": "cue_intro",
+      "storyboard_event_id": "event_label_sides",
+      "actions": [
+        {"type": "write", "target": "label_a", "run_time": 0.5},
+        {"type": "write", "target": "label_b", "run_time": 0.5},
+        {"type": "write", "target": "label_c", "run_time": 0.5}
+      ],
+      "wait_after": 0.6
+    },
+    {
+      "id": "step_show_small_squares",
+      "name": "Show leg area squares",
+      "timing_role": "derivation",
+      "narration_cue_id": "cue_squares",
+      "storyboard_event_id": "event_show_area_squares",
+      "actions": [
+        {"type": "fade_in", "target": "square_a_area", "run_time": 0.8},
+        {"type": "write", "target": "area_label_a2", "run_time": 0.5},
+        {"type": "fade_in", "target": "plus_label", "run_time": 0.3},
+        {"type": "fade_in", "target": "square_b_area", "run_time": 0.8},
+        {"type": "write", "target": "area_label_b2", "run_time": 0.5}
+      ],
+      "wait_after": 0.5
+    },
+    {
+      "id": "step_show_c_square",
+      "name": "Show hypotenuse area square",
+      "timing_role": "derivation",
+      "narration_cue_id": "cue_squares",
+      "storyboard_event_id": "event_label_areas",
+      "actions": [
+        {"type": "fade_in", "target": "equals_label", "run_time": 0.3},
+        {"type": "fade_in", "target": "square_c_area", "run_time": 0.9},
+        {"type": "write", "target": "area_label_c2", "run_time": 0.6}
+      ],
+      "wait_after": 0.6
+    },
+    {
+      "id": "step_highlight_relation",
+      "name": "Highlight the area relationship",
+      "timing_role": "derivation",
+      "narration_cue_id": "cue_relation",
+      "storyboard_event_id": "event_highlight_small_areas",
+      "actions": [
+        {"type": "highlight", "target": "square_a_area", "color": "BLUE", "run_time": 0.7},
+        {"type": "highlight", "target": "square_b_area", "color": "GREEN", "run_time": 0.7},
+        {"type": "highlight", "target": "square_c_area", "color": "GOLD", "run_time": 0.9}
+      ],
+      "wait_after": 0.5
+    },
+    {
+      "id": "step_clear_area_blocks",
+      "name": "Clear area blocks before final statement",
+      "narration_cue_id": "cue_final",
+      "storyboard_event_id": "event_final_formula",
+      "actions": [
+        {"type": "fade_out", "target": "square_a_area", "run_time": 0.25},
+        {"type": "fade_out", "target": "area_label_a2", "run_time": 0.25},
+        {"type": "fade_out", "target": "plus_label", "run_time": 0.2},
+        {"type": "fade_out", "target": "square_b_area", "run_time": 0.25},
+        {"type": "fade_out", "target": "area_label_b2", "run_time": 0.25},
+        {"type": "fade_out", "target": "equals_label", "run_time": 0.2},
+        {"type": "fade_out", "target": "square_c_area", "run_time": 0.25},
+        {"type": "fade_out", "target": "area_label_c2", "run_time": 0.25}
+      ],
+      "wait_after": 0.2
+    },
+    {
+      "id": "step_final_formula",
+      "name": "Write final formula",
+      "timing_role": "conclusion",
+      "narration_cue_id": "cue_final",
+      "storyboard_event_id": "event_final_formula",
+      "actions": [
+        {"type": "write", "target": "formula", "run_time": 1.0},
+        {"type": "fade_in", "target": "conclusion", "run_time": 0.8}
+      ],
+      "wait_after": 1.5
+    }
+  ]
+}

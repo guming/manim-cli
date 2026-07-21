@@ -1,28 +1,39 @@
-# manim-video MVP Skill
+---
+name: manim-video
+description: Create, validate, render, and repair Manim-based mathematical teaching videos through the manim-cli DSL. Use for equation derivations, theorem explanations, geometric constructions, mathematical graphs, animated notation or diagrams, and high-signal requests such as "Manim 视频", "数学教学视频", "勾股定理", "公式推导", or "几何证明". Do not use for general educational videos without meaningful mathematical visualization.
+---
 
-Use this skill when a user asks an agent to create a Manim math teaching video.
+# Manim Video
 
-## Workflow
+Build through `manim-cli` artifacts. Do not hand-write Manim Python.
 
-1. Create a lesson project with `manim-cli init <project-dir>`.
-2. Write the user brief to `brief.md`.
-3. Generate `plan.json`, then run `manim-cli plan validate plan.json`.
-4. Generate `storyboard.json`, then run `manim-cli storyboard validate storyboard.json`.
-5. Generate `scene.json` using only `manim-cli manifest` capabilities.
-6. Run `manim-cli validate scene.json`.
-7. Run `manim-cli compile scene.json --out generated --profile preview --pacing teaching`.
-8. Run `manim-cli render scene.json --quality low --pacing teaching --output renders/preview.mp4 --qa --pacing-qa`.
-9. On failure, run `manim-cli diagnose diagnostics/render.json --source-map generated/scene.py.map.json`.
-10. Modify the nearest upstream artifact. Do not edit `generated/scene.py`.
-11. After user review, run `manim-cli render scene.json --quality high --pacing teaching --output renders/final.mp4 --qa`.
+Read before acting:
 
-## Hard Rules
+- Read [workflow.md](workflow.md) for commands, modes, gates, and failure routing.
+- Read [references/artifact-examples.md](references/artifact-examples.md) before authoring a new project.
+- Read [references/authoring-guide.md](references/authoring-guide.md) when designing or reviewing a scene.
+- Read [references/troubleshooting.md](references/troubleshooting.md) when a command fails.
 
-- Do not write Python scene code by hand.
-- Do not edit `generated/scene.py`.
-- Do not use unsupported MVP DSL features: Graph, VGroup, multi-target actions, params action schema, safe_expression.
-- Prefer small scenes that validate and render before adding complexity.
-- Treat render quality and pacing as independent. Never use `draft`, `low`, or `preview` to imply faster teaching pace.
-- Use `teaching` for user-facing previews/finals, `preserve` for exact DSL timing, and `accelerated` only for explicit CI smoke tests.
-- Mark important steps with `timing_role: derivation` or `timing_role: conclusion`; final answers and captions must remain visible for at least 2 seconds.
-- Inspect `source_duration`, `effective_duration`, `effective_timeline`, `timing_changes`, and `pacing_qa` before accepting a video.
+## Start
+
+1. Detect a working `manim-cli` entry point and run `manim-cli manifest`.
+2. For new artifacts, inspect `manim-cli schema plan`, `schema storyboard`, and `schema scene`.
+3. Use `manim-cli example project --output <dir>` when a concrete starting point is useful.
+4. Select a mode:
+   - `interactive`: run one gate at a time and pause for approval. Use this by default for compatibility.
+   - `autonomous`: continue through passing gates when the user explicitly requests autonomous completion.
+5. Select the requested output: preview, final, review-first, or CI smoke.
+
+## Non-Negotiable Rules
+
+- Edit only `brief.md`, `plan.json`, `storyboard.json`, and `scene.json`.
+- Never edit generated Python, source maps, diagnostics, QA reports, or rendered media.
+- Validate every artifact before using it downstream.
+- Treat the current manifest and schema output as authoritative.
+- Use `teaching` pacing for user-facing output and `accelerated` only for explicit CI smoke tests.
+- Repair the closest editable upstream artifact; do not patch generated output.
+- Classify failures as artifact, environment/dependency, or probable compiler defects before repairing.
+
+## Deliver
+
+Return the preview or final video path, changed source artifacts, passed gates, and unresolved warnings or exact dependency blockers.

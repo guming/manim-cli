@@ -16,6 +16,18 @@ manim-cli render scene.json --quality low --output renders/preview.mp4 --qa
 manim-cli render scene.json --quality draft --pacing teaching --output renders/preview.mp4 --qa
 ```
 
+Agent authoring contracts and canonical examples:
+
+```bash
+manim-cli manifest
+manim-cli schema plan
+manim-cli schema storyboard
+manim-cli schema scene
+manim-cli example project --output lesson-example
+```
+
+`manifest` derives supported mobjects and actions from the runtime registries and includes JSON Schema for mobject arguments and actions. `schema` exposes the current Pydantic artifact contracts. `example project` copies the bundled canonical teaching example.
+
 Diagnostics and regression:
 
 ```bash
@@ -33,6 +45,15 @@ manim-cli visual-qa bbox-probe "\\frac{a}{b}"
 manim-cli visual-qa toolchain-status
 manim-cli visual-qa render-smoke scene.json --expect measured_safe --out smoke.mp4
 ```
+
+Agent skill install:
+
+```bash
+manim-cli skill install
+npx skill install
+```
+
+Both commands install the bundled `manim-video` agent skill to `~/.codex/skills/manim-video` by default. Use `--target-dir`, `--name`, `--force`, or `--dry-run` to customize installation.
 
 Layout memory:
 

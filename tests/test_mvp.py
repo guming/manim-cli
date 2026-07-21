@@ -2,6 +2,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import subprocess
 
 from click.testing import CliRunner
 import pytest
@@ -21,16 +22,18 @@ from manim_cli.dsl.knowledge import (
     retrieve_typed_top_k,
 )
 from manim_cli.dsl.layout import BBox, estimate_bbox, layout_warnings, overlaps, slot_region
-from manim_cli.dsl.models import RESERVED_FUTURE_MOBJECT_FIELDS, RESERVED_FUTURE_SCENE_FIELDS, SCENE_SCHEMA_VERSION, SUPPORTED_SCENE_VERSIONS
+from manim_cli.dsl.models import ActionDef, RESERVED_FUTURE_MOBJECT_FIELDS, RESERVED_FUTURE_SCENE_FIELDS, SCENE_SCHEMA_VERSION, SUPPORTED_SCENE_VERSIONS, SceneDef, TexArgs
 from manim_cli.dsl.names import safe_var_name
 from manim_cli.dsl.performance import benchmark_layout_memory, percentile
 from manim_cli.dsl.pacing import apply_pacing, build_step_duration_targets, pacing_warnings
+from manim_cli.dsl.registry import ACTION_REGISTRY, MOBJECT_REGISTRY
 from manim_cli.dsl.timeline import build_timeline
 from manim_cli.dsl.validators import parse_scene_data, parse_scene_file, validate_scene_data, validate_scene_file
 from manim_cli.jsonio import load_json
 from manim_cli.qa.eval import run_qa_eval
 from manim_cli.qa.engine import run_qa
 from manim_cli.planning.models import Storyboard, TeachingPlan
+from manim_cli.planning.validators import validate_plan_file, validate_storyboard_file
 from manim_cli.regression.manifest import run_regression_dir
 from manim_cli.render.diagnose import map_line
 from manim_cli.render.pacing_qa import run_render_pacing_qa
@@ -2251,6 +2254,100 @@ def test_render_cli_exposes_independent_pacing_option():
     assert result.exit_code == 0
     assert "--pacing [preserve|teaching|accelerated]" in result.output
     assert "--pacing-qa / --no-pacing-qa" in result.output
+
+
+def test_skill_install_command_copies_bundled_skill(tmp_path):
+    target_dir = tmp_path / "skills"
+    result = CliRunner().invoke(main, ["skill", "install", "--target-dir", str(target_dir)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"], payload
+    assert payload["phase"] == "skill_install"
+    assert payload["destination"] == str(target_dir / "manim-video")
+    assert "SKILL.md" in payload["files"]
+    assert "agents/openai.yaml" in payload["files"]
+    assert "workflow.md" in payload["files"]
+    assert "references/artifact-examples.md" in payload["files"]
+    installed_skill = target_dir / "manim-video" / "SKILL.md"
+    assert installed_skill.exists()
+    assert installed_skill.read_text(encoding="utf-8").startswith("---\nname: manim-video\n")
+    assert (target_dir / "manim-video" / "references" / "troubleshooting.md").exists()
+
+    duplicate = CliRunner().invoke(main, ["skill", "install", "--target-dir", str(target_dir)])
+    assert duplicate.exit_code == 1
+    duplicate_payload = json.loads(duplicate.output)
+    assert duplicate_payload["error_type"] == "destination_exists"
+
+
+def test_npx_skill_installer_entrypoint(tmp_path):
+    target_dir = tmp_path / "skills"
+    result = subprocess.run(
+        ["node", "bin/skill.js", "install", "--target-dir", str(target_dir)],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"], payload
+    assert payload["phase"] == "skill_install"
+    assert payload["destination"] == str(target_dir / "manim-video")
+    assert "SKILL.md" in payload["files"]
+    assert "agents/openai.yaml" in payload["files"]
+    assert (target_dir / "manim-video" / "workflow.md").exists()
+
+
+def test_manifest_exposes_registry_derived_schemas():
+    result = CliRunner().invoke(main, ["manifest"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert set(payload["mobject_types"]) == set(MOBJECT_REGISTRY)
+    assert set(payload["action_types"]) == set(ACTION_REGISTRY)
+    assert payload["mobject_types"]["Tex"]["args_schema"] == TexArgs.model_json_schema()
+    assert payload["action_schema"] == ActionDef.model_json_schema()
+    assert "unsupported_mvp" not in payload
+
+
+@pytest.mark.parametrize("artifact", ["plan", "storyboard", "scene"])
+def test_schema_command_exposes_current_model_schema(artifact):
+    result = CliRunner().invoke(main, ["schema", artifact])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    expected = {
+        "plan": TeachingPlan,
+        "storyboard": Storyboard,
+        "scene": SceneDef,
+    }[artifact].model_json_schema(by_alias=True)
+    assert payload["schema"] == expected
+
+
+def test_bundled_canonical_example_matches_source_and_compiles(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    source = repo_root / "examples" / "pythagorean_theorem"
+    bundled = repo_root / "manim_cli" / "agent" / "skill" / "examples" / "pythagorean_theorem"
+    names = ("brief.md", "plan.json", "project.json", "scene.json", "storyboard.json")
+    for name in names:
+        assert (bundled / name).read_bytes() == (source / name).read_bytes()
+
+    output = tmp_path / "example-project"
+    result = CliRunner().invoke(main, ["example", "project", "--output", str(output)])
+    assert result.exit_code == 0, result.output
+    assert validate_plan_file(output / "plan.json")["ok"]
+    assert validate_storyboard_file(output / "storyboard.json")["ok"]
+    assert validate_scene_file(output / "scene.json")["ok"]
+    compile_result = compile_scene_file(output / "scene.json", output / "generated", "preview")
+    assert compile_result["ok"], compile_result
+
+
+def test_skill_contract_declares_modes_and_valid_references():
+    skill_dir = Path(__file__).parents[1] / "manim_cli" / "agent" / "skill"
+    skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    workflow_text = (skill_dir / "workflow.md").read_text(encoding="utf-8")
+    assert "`interactive`" in skill_text and "`autonomous`" in skill_text
+    assert "`interactive`" in workflow_text and "`autonomous`" in workflow_text
+    for reference in ("artifact-examples.md", "authoring-guide.md", "troubleshooting.md"):
+        assert (skill_dir / "references" / reference).exists()
 
 
 def test_compile_quality_profiles_do_not_change_teaching_duration(tmp_path):

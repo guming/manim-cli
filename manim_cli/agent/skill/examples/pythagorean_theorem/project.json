@@ -1,0 +1,16 @@
+{
+  "artifacts": {
+    "brief": "brief.md",
+    "final": "renders/final.mp4",
+    "generated_scene": "generated/scene.py",
+    "plan": "plan.json",
+    "preview": "renders/preview-teaching.mp4",
+    "scene": "scene.json",
+    "source_map": "generated/scene.py.map.json",
+    "storyboard": "storyboard.json"
+  },
+  "created_by": "agent",
+  "id": "pythagorean_theorem",
+  "manim_cli_version": "0.1.0",
+  "status": "preview_verified"
+}
